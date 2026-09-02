@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Direct Android UDP/RTP ingestion; no HTTP polling or loopback relay."""
 import json, math, socket, threading, time
+from pathlib import Path
+from queue import Full, Queue
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from dji_edge_bridge.msg import NavigationState
@@ -36,6 +38,24 @@ class Endpoint(threading.Thread):
         if self.sock: self.sock.close()
         self.join(timeout=2)
 
+class Evidence:
+    """Small append-only NDJSON writer; never blocks the UDP receive path."""
+    def __init__(self, root):
+        self.root=Path(root); self.root.mkdir(parents=True,exist_ok=True); self.lock=threading.Lock(); self.dropped=self.errors=0; self.queue=Queue(maxsize=16384); self.stop=threading.Event(); self.worker=threading.Thread(target=self.run,daemon=True); self.worker.start()
+    def run(self):
+        while not self.stop.is_set():
+            try: category,record=self.queue.get(timeout=.2)
+            except Exception: continue
+            try:
+                with (self.root/f"{category}.ndjson").open("a",encoding="utf-8") as f: f.write(json.dumps(record,separators=(",",":"),sort_keys=True)+"\n")
+            except OSError:
+                with self.lock:self.errors+=1
+            finally:self.queue.task_done()
+    def write(self, category, record):
+        try:self.queue.put_nowait((category,record))
+        except Full:
+            with self.lock:self.dropped+=1
+
 class Video:
     def __init__(self,node,name,port,topic):
         self.node,self.name,self.frames,self.width,self.height,self.error=node,name,0,0,0,None; self.pipeline=self.Gst=None
@@ -65,12 +85,12 @@ class Video:
 class EdgeBridge(Node):
     def __init__(self):
         super().__init__("dji_edge_bridge")
-        defaults={"bind_host":"0.0.0.0","telemetry_port":5500,"frame_metadata_port":5501,"primary_rtp_port":5600,"fpv_rtp_port":5610,"max_json_bytes":1200,"rtp_payload_type":96,"rtp_latency_ms":20,"preview_windows":True,"publish_video":True,"primary_topic":"/dji/primary/image_raw","fpv_topic":"/dji/fpv/image_raw","navigation_topic":"/dji/navigation/state","flight_topic":"/dji/telemetry/flight","rtk_topic":"/dji/telemetry/rtk","gimbal_topic":"/dji/telemetry/gimbal","frame_metadata_topic":"/dji/telemetry/frame_metadata","diagnostics_topic":"/dji/diagnostics"}
+        defaults={"bind_host":"0.0.0.0","telemetry_port":5500,"frame_metadata_port":5501,"primary_rtp_port":5600,"fpv_rtp_port":5610,"max_json_bytes":1200,"rtp_payload_type":96,"rtp_latency_ms":20,"preview_windows":True,"publish_video":True,"evidence_dir":"evidence","primary_topic":"/dji/primary/image_raw","fpv_topic":"/dji/fpv/image_raw","navigation_topic":"/dji/navigation/state","flight_topic":"/dji/telemetry/flight","rtk_topic":"/dji/telemetry/rtk","gimbal_topic":"/dji/telemetry/gimbal","frame_metadata_topic":"/dji/telemetry/frame_metadata","diagnostics_topic":"/dji/diagnostics"}
         for k,v in defaults.items(): self.declare_parameter(k,v)
         p=lambda k:self.get_parameter(k).value
         for k in ("bind_host","max_json_bytes","rtp_payload_type","rtp_latency_ms","preview_windows"): setattr(self,k,p(k))
         self.nav=self.create_publisher(NavigationState,p("navigation_topic"),10); self.out={"flight":self.create_publisher(String,p("flight_topic"),10),"rtk":self.create_publisher(String,p("rtk_topic"),10),"gimbal":self.create_publisher(String,p("gimbal_topic"),10),"frame_meta":self.create_publisher(String,p("frame_metadata_topic"),10),"video_au":self.create_publisher(String,p("frame_metadata_topic"),10)}; self.diag=self.create_publisher(DiagnosticArray,p("diagnostics_topic"),10)
-        self.latest={}; self.seq={}; self.accepted=self.rejected=0; self.endpoint_errors={}; self.inputs=[Endpoint(self,p("telemetry_port"),self.ingest),Endpoint(self,p("frame_metadata_port"),self.ingest)]
+        self.evidence=Evidence(p("evidence_dir")); self.latest={}; self.seq={}; self.accepted=self.rejected=0; self.endpoint_errors={}; self.inputs=[Endpoint(self,p("telemetry_port"),self.ingest),Endpoint(self,p("frame_metadata_port"),self.ingest)]
         for e in self.inputs:e.start()
         self.videos=[] if not p("publish_video") else [Video(self,"primary",p("primary_rtp_port"),p("primary_topic")),Video(self,"fpv",p("fpv_rtp_port"),p("fpv_topic"))]
         self.create_timer(1.0,self.publish_diagnostics)
@@ -79,10 +99,11 @@ class EdgeBridge(Node):
             if not data or len(data)>self.max_json_bytes: raise ValueError()
             raw=json.loads(data.decode()); typ=raw["type"]; session=raw.get("session",raw.get("session_id")); stream=raw.get("stream",typ); seq=raw.get("frame_seq" if typ in {"frame_meta","video_au"} else "seq"); mono=raw.get("au_first_byte_rx_mono_ns",raw.get("rx_mono_ns",raw.get("android_mono_ns")))
             if typ not in {"telemetry","flight","rtk","gimbal","health","hello","frame_meta","video_au"} or not isinstance(session,str) or not isinstance(seq,int) or not isinstance(mono,int): raise ValueError()
-        except Exception: self.rejected+=1; return
+        except Exception:
+            self.rejected+=1; self.evidence.write("protocol_errors",{"edge_receive_mono_ns":edge_ns,"remote":f"{remote[0]}:{remote[1]}","raw":data.decode("utf-8",errors="replace")}); return
         key=(session,typ,stream)
         if seq<=self.seq.get(key,-1): return
-        self.seq[key]=seq; self.accepted+=1; record={"session":session,"type":typ,"stream":stream,"sequence":seq,"android_mono_ns":mono,"edge_receive_mono_ns":edge_ns,"remote":f"{remote[0]}:{remote[1]}","data":raw.get("data",raw)}; self.latest[typ if typ!="gimbal" else f"gimbal:{stream}"]=record
+        self.seq[key]=seq; self.accepted+=1; record={"session":session,"type":typ,"stream":stream,"sequence":seq,"android_mono_ns":mono,"edge_receive_mono_ns":edge_ns,"remote":f"{remote[0]}:{remote[1]}","data":raw.get("data",raw)}; self.evidence.write("frame_metadata" if typ in {"frame_meta","video_au"} else "telemetry",record); self.latest[typ if typ!="gimbal" else f"gimbal:{stream}"]=record
         if typ in self.out: msg=String(); msg.data=json.dumps(record,separators=(",",":"),sort_keys=True); self.out[typ].publish(msg)
         if typ in {"flight","rtk"}: self.publish_navigation()
     def publish_navigation(self):
@@ -90,7 +111,7 @@ class EdgeBridge(Node):
         if not(finite(lat) and finite(lon)): return
         m=NavigationState(); m.header.stamp=self.get_clock().now().to_msg(); m.header.frame_id="wgs84"; m.latitude_deg,m.longitude_deg=float(lat),float(lon); m.altitude_m=float(unwrap(ff,"aircraft.altitude_m",0) or 0); m.heading_deg=float(unwrap(ff,"heading_deg",0) or 0); m.velocity_north_m_s=float(unwrap(ff,"velocity.north_m_s",0) or 0); m.velocity_east_m_s=float(unwrap(ff,"velocity.east_m_s",0) or 0); m.velocity_down_m_s=float(unwrap(ff,"velocity.down_m_s",0) or 0); m.position_source=NavigationState.POSITION_RTK if rv else NavigationState.POSITION_GPS_FALLBACK; m.position_valid,m.rtk_valid=True,rv; m.gps_signal_level=int(unwrap(ff,"gps.signal_level",0) or 0); source=rtk if rv else flight; m.session=source.get("session",""); m.android_mono_ns=int(source.get("android_mono_ns",0)); m.edge_receive_mono_ns=int(source.get("edge_receive_mono_ns",0)); m.transport_age_s=float("nan"); self.nav.publish(m)
     def publish_diagnostics(self):
-        a=DiagnosticArray(); a.header.stamp=self.get_clock().now().to_msg(); s=DiagnosticStatus(name="dji_edge_bridge/direct",level=DiagnosticStatus.OK if self.accepted and not self.endpoint_errors else DiagnosticStatus.WARN,message="direct Android ingress"); s.values=[KeyValue(key="post_network.accepted",value=str(self.accepted)),KeyValue(key="post_network.rejected",value=str(self.rejected)),KeyValue(key="legacy_http_polling",value="disabled")]
+        a=DiagnosticArray(); a.header.stamp=self.get_clock().now().to_msg(); s=DiagnosticStatus(name="dji_edge_bridge/direct",level=DiagnosticStatus.OK if self.accepted and not self.endpoint_errors else DiagnosticStatus.WARN,message="direct Android ingress"); s.values=[KeyValue(key="post_network.accepted",value=str(self.accepted)),KeyValue(key="post_network.rejected",value=str(self.rejected)),KeyValue(key="evidence.path",value=str(self.evidence.root)),KeyValue(key="evidence.write_errors",value=str(self.evidence.errors)),KeyValue(key="evidence.dropped_records",value=str(self.evidence.dropped)),KeyValue(key="legacy_http_polling",value="disabled")]
         for port,error in self.endpoint_errors.items(): s.values.append(KeyValue(key=f"udp.{port}.error",value=error))
         for v in self.videos:s.values += [KeyValue(key=f"{v.name}.frames",value=str(v.frames)),KeyValue(key=f"{v.name}.resolution",value=f"{v.width}x{v.height}"),KeyValue(key=f"{v.name}.error",value=v.error or "")]
         a.status=[s]; self.diag.publish(a)
