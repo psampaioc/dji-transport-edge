@@ -8,6 +8,7 @@ from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from dji_edge_bridge.msg import NavigationState
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
@@ -123,6 +124,8 @@ class EdgeBridge(Node):
 def main():
     rclpy.init(); n=EdgeBridge()
     try:rclpy.spin(n)
-    except KeyboardInterrupt:pass
-    finally:n.destroy_node();rclpy.shutdown()
+    except (KeyboardInterrupt, ExternalShutdownException):pass
+    finally:
+        n.destroy_node()
+        if rclpy.ok(): rclpy.shutdown()
 if __name__=="__main__":main()
