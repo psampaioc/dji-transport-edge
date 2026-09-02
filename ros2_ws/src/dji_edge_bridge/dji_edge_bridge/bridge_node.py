@@ -11,9 +11,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
-from dji_edge_receiver.protocol import FRAME_TYPES, ProtocolError, decode_json_packet
-from dji_edge_receiver.clock import ClockMapper
-from dji_edge_receiver.state import LatestState, SequenceTracker
+from dji_edge_transport_core.protocol import FRAME_TYPES, ProtocolError, decode_json_packet
+from dji_edge_transport_core.clock import ClockMapper
+from dji_edge_transport_core.state import LatestState, SequenceTracker
 
 def unwrap(fields, key, default=None):
     v = fields.get(key, default)
