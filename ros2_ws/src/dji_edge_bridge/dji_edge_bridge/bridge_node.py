@@ -19,7 +19,13 @@ class Endpoint(threading.Thread):
     def __init__(self, node, port, callback):
         super().__init__(daemon=True); self.node, self.port, self.callback, self.stop = node, port, callback, threading.Event(); self.sock = None
     def run(self):
-        self.sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); self.sock.settimeout(.2); self.sock.bind((self.node.bind_host,self.port))
+        self.sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); self.sock.settimeout(.2)
+        try:
+            self.sock.bind((self.node.bind_host,self.port))
+        except OSError as error:
+            self.node.endpoint_errors[self.port] = str(error)
+            self.node.get_logger().error(f"UDP {self.port} unavailable: {error}")
+            return
         while not self.stop.is_set():
             try: data, remote=self.sock.recvfrom(self.node.max_json_bytes+1)
             except socket.timeout: continue
@@ -64,7 +70,7 @@ class EdgeBridge(Node):
         p=lambda k:self.get_parameter(k).value
         for k in ("bind_host","max_json_bytes","rtp_payload_type","rtp_latency_ms","preview_windows"): setattr(self,k,p(k))
         self.nav=self.create_publisher(NavigationState,p("navigation_topic"),10); self.out={"flight":self.create_publisher(String,p("flight_topic"),10),"rtk":self.create_publisher(String,p("rtk_topic"),10),"gimbal":self.create_publisher(String,p("gimbal_topic"),10),"frame_meta":self.create_publisher(String,p("frame_metadata_topic"),10),"video_au":self.create_publisher(String,p("frame_metadata_topic"),10)}; self.diag=self.create_publisher(DiagnosticArray,p("diagnostics_topic"),10)
-        self.latest={}; self.seq={}; self.accepted=self.rejected=0; self.inputs=[Endpoint(self,p("telemetry_port"),self.ingest),Endpoint(self,p("frame_metadata_port"),self.ingest)]
+        self.latest={}; self.seq={}; self.accepted=self.rejected=0; self.endpoint_errors={}; self.inputs=[Endpoint(self,p("telemetry_port"),self.ingest),Endpoint(self,p("frame_metadata_port"),self.ingest)]
         for e in self.inputs:e.start()
         self.videos=[] if not p("publish_video") else [Video(self,"primary",p("primary_rtp_port"),p("primary_topic")),Video(self,"fpv",p("fpv_rtp_port"),p("fpv_topic"))]
         self.create_timer(1.0,self.publish_diagnostics)
@@ -84,7 +90,8 @@ class EdgeBridge(Node):
         if not(finite(lat) and finite(lon)): return
         m=NavigationState(); m.header.stamp=self.get_clock().now().to_msg(); m.header.frame_id="wgs84"; m.latitude_deg,m.longitude_deg=float(lat),float(lon); m.altitude_m=float(unwrap(ff,"aircraft.altitude_m",0) or 0); m.heading_deg=float(unwrap(ff,"heading_deg",0) or 0); m.velocity_north_m_s=float(unwrap(ff,"velocity.north_m_s",0) or 0); m.velocity_east_m_s=float(unwrap(ff,"velocity.east_m_s",0) or 0); m.velocity_down_m_s=float(unwrap(ff,"velocity.down_m_s",0) or 0); m.position_source=NavigationState.POSITION_RTK if rv else NavigationState.POSITION_GPS_FALLBACK; m.position_valid,m.rtk_valid=True,rv; m.gps_signal_level=int(unwrap(ff,"gps.signal_level",0) or 0); source=rtk if rv else flight; m.session=source.get("session",""); m.android_mono_ns=int(source.get("android_mono_ns",0)); m.edge_receive_mono_ns=int(source.get("edge_receive_mono_ns",0)); m.transport_age_s=float("nan"); self.nav.publish(m)
     def publish_diagnostics(self):
-        a=DiagnosticArray(); a.header.stamp=self.get_clock().now().to_msg(); s=DiagnosticStatus(name="dji_edge_bridge/direct",level=DiagnosticStatus.OK if self.accepted else DiagnosticStatus.WARN,message="direct Android ingress"); s.values=[KeyValue(key="post_network.accepted",value=str(self.accepted)),KeyValue(key="post_network.rejected",value=str(self.rejected)),KeyValue(key="legacy_http_polling",value="disabled")]
+        a=DiagnosticArray(); a.header.stamp=self.get_clock().now().to_msg(); s=DiagnosticStatus(name="dji_edge_bridge/direct",level=DiagnosticStatus.OK if self.accepted and not self.endpoint_errors else DiagnosticStatus.WARN,message="direct Android ingress"); s.values=[KeyValue(key="post_network.accepted",value=str(self.accepted)),KeyValue(key="post_network.rejected",value=str(self.rejected)),KeyValue(key="legacy_http_polling",value="disabled")]
+        for port,error in self.endpoint_errors.items(): s.values.append(KeyValue(key=f"udp.{port}.error",value=error))
         for v in self.videos:s.values += [KeyValue(key=f"{v.name}.frames",value=str(v.frames)),KeyValue(key=f"{v.name}.resolution",value=f"{v.width}x{v.height}"),KeyValue(key=f"{v.name}.error",value=v.error or "")]
         a.status=[s]; self.diag.publish(a)
     def destroy_node(self):
