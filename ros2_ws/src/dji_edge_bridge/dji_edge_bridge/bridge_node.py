@@ -12,6 +12,8 @@ from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from dji_edge_receiver.protocol import FRAME_TYPES, ProtocolError, decode_json_packet
+from dji_edge_receiver.clock import ClockMapper
+from dji_edge_receiver.state import LatestState, SequenceTracker
 
 def unwrap(fields, key, default=None):
     v = fields.get(key, default)
@@ -92,7 +94,7 @@ class EdgeBridge(Node):
         p=lambda k:self.get_parameter(k).value
         for k in ("bind_host","max_json_bytes","rtp_payload_type","rtp_latency_ms","preview_windows"): setattr(self,k,p(k))
         self.nav=self.create_publisher(NavigationState,p("navigation_topic"),10); self.out={"flight":self.create_publisher(String,p("flight_topic"),10),"rtk":self.create_publisher(String,p("rtk_topic"),10),"gimbal":self.create_publisher(String,p("gimbal_topic"),10),"frame_meta":self.create_publisher(String,p("frame_metadata_topic"),10),"video_au":self.create_publisher(String,p("frame_metadata_topic"),10)}; self.diag=self.create_publisher(DiagnosticArray,p("diagnostics_topic"),10)
-        self.evidence=Evidence(p("evidence_dir")); self.latest={}; self.seq={}; self.accepted=self.rejected=0; self.endpoint_errors={}; self.clock_pongs=0; self.inputs=[Endpoint(self,p("telemetry_port"),self.ingest),Endpoint(self,p("frame_metadata_port"),self.ingest),Endpoint(self,p("clock_port"),self.ingest_clock)]
+        self.evidence=Evidence(p("evidence_dir")); self.clock_mapper=ClockMapper(); self.latest_state=LatestState(self.clock_mapper); self.latest={}; self.seq=SequenceTracker(); self.accepted=self.rejected=0; self.endpoint_errors={}; self.clock_pongs=0; self.inputs=[Endpoint(self,p("telemetry_port"),self.ingest),Endpoint(self,p("frame_metadata_port"),self.ingest),Endpoint(self,p("clock_port"),self.ingest_clock)]
         for e in self.inputs:e.start()
         self.videos=[] if not p("publish_video") else [Video(self,"primary",p("primary_rtp_port"),p("primary_topic")),Video(self,"fpv",p("fpv_rtp_port"),p("fpv_topic"))]
         self.create_timer(1.0,self.publish_diagnostics)
@@ -102,9 +104,9 @@ class EdgeBridge(Node):
             raw,typ,session,stream,seq,mono=packet.raw,packet.packet_type,packet.session,packet.stream,packet.sequence,packet.android_mono_ns
         except ProtocolError:
             self.rejected+=1; self.evidence.write("protocol_errors",{"edge_receive_mono_ns":edge_ns,"remote":f"{remote[0]}:{remote[1]}","raw":data.decode("utf-8",errors="replace")}); return
-        key=(session,typ,stream)
-        if seq<=self.seq.get(key,-1): return
-        self.seq[key]=seq; self.accepted+=1; record={"session":session,"type":typ,"stream":stream,"sequence":seq,"android_mono_ns":mono,"edge_receive_mono_ns":edge_ns,"remote":f"{remote[0]}:{remote[1]}","data":raw.get("data",raw)}; self.evidence.write("frame_metadata" if typ in {"frame_meta","video_au"} else "telemetry",record); self.latest[typ if typ!="gimbal" else f"gimbal:{stream}"]=record
+        result=self.seq.observe((session,typ,stream),seq); self.latest_state.update_packet(packet,edge_ns,remote,result)
+        if not result.is_newest: return
+        self.accepted+=1; record={"session":session,"type":typ,"stream":stream,"sequence":seq,"android_mono_ns":mono,"edge_receive_mono_ns":edge_ns,"remote":f"{remote[0]}:{remote[1]}","data":raw.get("data",raw)}; self.evidence.write("frame_metadata" if typ in {"frame_meta","video_au"} else "telemetry",record); self.latest[typ if typ!="gimbal" else f"gimbal:{stream}"]=record
         if typ in self.out: msg=String(); msg.data=json.dumps(record,separators=(",",":"),sort_keys=True); self.out[typ].publish(msg)
         if typ in {"flight","rtk"}: self.publish_navigation()
     def ingest_clock(self,data,remote,edge_ns):
@@ -113,7 +115,7 @@ class EdgeBridge(Node):
             if raw.get("type")!="clock_pong": raise ValueError()
             t0,t1,t2=(int(raw[k]) for k in ("t0_edge_send_mono_ns","t1_android_rx_mono_ns","t2_android_tx_mono_ns"));
             if min(t0,t1,t2)<=0 or t2<t1 or edge_ns<t0: raise ValueError()
-            self.clock_pongs+=1; self.evidence.write("clock",{"edge_receive_mono_ns":edge_ns,"remote":f"{remote[0]}:{remote[1]}","t0_edge_send_mono_ns":t0,"t1_android_rx_mono_ns":t1,"t2_android_tx_mono_ns":t2,"round_trip_ns":(edge_ns-t0)-(t2-t1)})
+            sample=self.clock_mapper.add_exchange(t0,t1,t2,edge_ns); self.clock_pongs+=1; self.evidence.write("clock",{**sample.as_dict(),"estimate":self.clock_mapper.estimate(),"remote":f"{remote[0]}:{remote[1]}"})
         except Exception: self.rejected+=1
     def publish_navigation(self):
         flight=self.latest.get("flight",{}); rtk=self.latest.get("rtk",{}); ff=flight.get("data",{}).get("fields",{}); rf=rtk.get("data",{}).get("fields",{}); rlat,rlon=unwrap(rf,"fusion.latitude_deg"),unwrap(rf,"fusion.longitude_deg"); rv=bool(unwrap(rf,"is_being_used",False)) and finite(rlat) and finite(rlon); lat,lon=(rlat,rlon) if rv else (unwrap(ff,"aircraft.latitude_deg"),unwrap(ff,"aircraft.longitude_deg"))
