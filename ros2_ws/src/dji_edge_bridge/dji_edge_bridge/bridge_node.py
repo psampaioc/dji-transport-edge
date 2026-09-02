@@ -11,6 +11,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
+from dji_edge_receiver.protocol import FRAME_TYPES, ProtocolError, decode_json_packet
 
 def unwrap(fields, key, default=None):
     v = fields.get(key, default)
@@ -97,10 +98,9 @@ class EdgeBridge(Node):
         self.create_timer(1.0,self.publish_diagnostics)
     def ingest(self,data,remote,edge_ns):
         try:
-            if not data or len(data)>self.max_json_bytes: raise ValueError()
-            raw=json.loads(data.decode()); typ=raw["type"]; session=raw.get("session",raw.get("session_id")); stream=raw.get("stream",typ); seq=raw.get("frame_seq" if typ in {"frame_meta","video_au"} else "seq"); mono=raw.get("au_first_byte_rx_mono_ns",raw.get("rx_mono_ns",raw.get("android_mono_ns")))
-            if typ not in {"telemetry","flight","rtk","gimbal","health","hello","frame_meta","video_au"} or not isinstance(session,str) or not isinstance(seq,int) or not isinstance(mono,int): raise ValueError()
-        except Exception:
+            packet=decode_json_packet(data,expected_version=1,max_bytes=self.max_json_bytes)
+            raw,typ,session,stream,seq,mono=packet.raw,packet.packet_type,packet.session,packet.stream,packet.sequence,packet.android_mono_ns
+        except ProtocolError:
             self.rejected+=1; self.evidence.write("protocol_errors",{"edge_receive_mono_ns":edge_ns,"remote":f"{remote[0]}:{remote[1]}","raw":data.decode("utf-8",errors="replace")}); return
         key=(session,typ,stream)
         if seq<=self.seq.get(key,-1): return
