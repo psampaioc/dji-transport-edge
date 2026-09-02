@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dji-edge-receiver"
+version = "0.1.0"
+description = "Low-latency DJI MSDK telemetry and RTP/H.264 receiver for Ubuntu edge machines"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = []
+
+[project.scripts]
+dji-edge-receiver = "dji_edge_receiver.cli:main"
+dji-edge = "dji_edge_receiver.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dji_edge_receiver*"]
+
+[tool.setuptools.package-data]
+dji_edge_receiver = ["config.example.toml", "dashboard_static/*.html", "dashboard_static/*.css", "dashboard_static/*.js"]

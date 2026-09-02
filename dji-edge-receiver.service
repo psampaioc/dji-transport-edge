@@ -1,0 +1,17 @@
+[Unit]
+Description=DJI video and telemetry edge receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dji-edge-receiver
+ExecStart=/opt/dji-edge-receiver/.venv/bin/dji-edge-receiver run --config /etc/dji-edge-receiver.toml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
+

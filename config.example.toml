@@ -1,0 +1,43 @@
+protocol_version = 1
+
+[network]
+bind_host = "0.0.0.0"
+telemetry_port = 5500
+frame_metadata_port = 5501
+clock_port = 5502
+http_host = "127.0.0.1"
+http_port = 8088
+max_datagram_bytes = 1200
+# Set this to the tablet address so edge time can be mapped to Android monotonic time.
+# android_clock_host = "192.168.50.20"
+android_clock_port = 5502
+clock_ping_interval_s = 1.0
+
+[storage]
+evidence_dir = "./evidence"
+capture_rtp = true
+fsync = false
+
+# Desktop dashboard only. It is intentionally restricted to this Ubuntu host.
+[dashboard]
+host = "127.0.0.1"
+port = 8090
+open_browser = true
+
+[[video_streams]]
+name = "primary"
+input_port = 5600
+pipeline_port = 5602
+rtp_payload_type = 96
+latency_ms = 20
+gstreamer_enabled = true
+sink = "avdec_h264 max-threads=2 ! videoconvert ! video/x-raw,format=BGR ! queue leaky=downstream max-size-buffers=1 ! fakesink sync=false"
+
+[[video_streams]]
+name = "secondary"
+input_port = 5610
+pipeline_port = 5612
+rtp_payload_type = 96
+latency_ms = 20
+gstreamer_enabled = true
+sink = "avdec_h264 max-threads=2 ! videoconvert ! video/x-raw,format=BGR ! queue leaky=downstream max-size-buffers=1 ! fakesink sync=false"

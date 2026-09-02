@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DJI Transport Edge</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <main class="instrument">
+      <header class="masthead">
+        <div><p class="eyebrow">DJI / UBUNTU EDGE</p><h1>DJI Transport Edge</h1></div>
+        <div class="session"><span id="receiver-dot" class="dot"></span><strong id="receiver-status">Receiver status: connecting</strong><small id="updated-at">waiting for receiver</small></div>
+      </header>
+
+      <section class="signal-rail" aria-label="Video signal path"><span>TABLET</span><i></i><span>UBUNTU EDGE</span><i></i><span>GSTREAMER VIDEO WINDOWS</span></section>
+      <section id="feed-grid" class="feed-grid" aria-live="polite"></section>
+
+      <section class="grid lower-grid">
+        <article class="panel config-panel">
+          <p class="eyebrow">SESSION ROUTING</p><h2>Tablet clock address</h2>
+          <label for="tablet-ip">Tablet IPv4</label>
+          <div class="input-row"><input id="tablet-ip" inputmode="decimal" autocomplete="off"><button id="apply-config">Save and restart receiver</button></div>
+          <p id="apply-message" class="hint">Only this address is editable here. Ports and video settings stay file-managed.</p>
+          <div><span class="metric-label">Ubuntu addresses — copy one into the tablet transport UI</span><div id="local-ips" class="chips"></div><p id="copy-message" class="hint" aria-live="polite"></p></div>
+          <div id="session-config" class="facts"></div>
+          <div class="capture-row"><div><span class="metric-label">Raw RTP evidence</span><p class="hint">When off, telemetry and frame metadata continue. Raw `.rtpbin` video is no longer written to disk.</p></div><label class="switch-label" for="capture-rtp"><input id="capture-rtp" type="checkbox" role="switch"><span class="switch" aria-hidden="true"></span><span id="capture-state">On</span></label></div>
+          <div class="shutdown-row"><div><span class="metric-label">Application control</span><p class="hint">Stops the receiver, this dashboard, and both GStreamer video windows.</p></div><button id="shutdown" class="danger" type="button">Exit transport</button></div>
+        </article>
+        <article class="panel">
+          <p class="eyebrow">TIMING BOUNDARY</p><h2>Clock and transport estimate</h2>
+          <div id="timing" class="facts"></div>
+          <p class="hint">Callback-to-edge is Android callback time to Ubuntu UDP receipt. It is not camera exposure-to-screen latency.</p>
+        </article>
+      </section>
+
+      <section class="grid lower-grid">
+        <article class="panel"><p class="eyebrow">TELEMETRY / RTK</p><h2>Latest source state</h2><div id="telemetry" class="facts"></div></article>
+        <article class="panel"><p class="eyebrow">TRANSPORT IMPACT</p><h2>Receiver and evidence</h2><div id="impact" class="facts"></div></article>
+      </section>
+
+      <section class="panel bench"><div><p class="eyebrow">BOUNDED MEASUREMENT</p><h2>Transport bench</h2><p class="hint">Captures window-only deltas without stopping video or telemetry ingest.</p></div><div class="bench-controls"><label class="duration-field"><span>Duration</span><span class="duration-input"><input id="bench-duration" type="number" min="1" value="60"><b>s</b></span></label><div class="bench-actions"><button id="bench-start">Start measurement</button><button id="bench-stop" class="quiet">Stop</button></div></div><pre id="bench-result" aria-live="polite">No measurement started.</pre></section>
+    </main>
+    <template id="feed-template"><article class="feed panel"><div class="feed-title"><div><p class="eyebrow feed-name"></p><h2 class="feed-status"></h2></div><span class="badge"></span></div><p class="feed-explanation"></p><div class="feed-metrics"></div><p class="hint feed-boundary"></p></article></template>
+    <script src="/app.js"></script>
+  </body>
+</html>
