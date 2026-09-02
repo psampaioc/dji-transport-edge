@@ -82,7 +82,7 @@ class EdgeBridge(Node):
         except Exception: self.rejected+=1; return
         key=(session,typ,stream)
         if seq<=self.seq.get(key,-1): return
-        self.seq[key]=seq; self.accepted+=1; record={"type":typ,"stream":stream,"sequence":seq,"android_mono_ns":mono,"edge_receive_mono_ns":edge_ns,"remote":f"{remote[0]}:{remote[1]}","data":raw.get("data",raw)}; self.latest[typ if typ!="gimbal" else f"gimbal:{stream}"]=record
+        self.seq[key]=seq; self.accepted+=1; record={"session":session,"type":typ,"stream":stream,"sequence":seq,"android_mono_ns":mono,"edge_receive_mono_ns":edge_ns,"remote":f"{remote[0]}:{remote[1]}","data":raw.get("data",raw)}; self.latest[typ if typ!="gimbal" else f"gimbal:{stream}"]=record
         if typ in self.out: msg=String(); msg.data=json.dumps(record,separators=(",",":"),sort_keys=True); self.out[typ].publish(msg)
         if typ in {"flight","rtk"}: self.publish_navigation()
     def publish_navigation(self):
