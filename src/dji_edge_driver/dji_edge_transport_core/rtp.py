@@ -30,7 +30,9 @@ class RtpMetrics:
         self._access_unit_bytes_max = 0
         self._current_access_unit_bytes = 0
         self._last_rtp_timestamp: int | None = None
-        self._access_unit_times: deque[int] = deque(maxlen=120)
+        # Keep a bounded measurement window. Lifetime totals are exposed
+        # separately, so they must not be divided by a short recent window.
+        self._recent_access_units: deque[tuple[int, int]] = deque(maxlen=120)
 
     def observe(self, data: bytes, receive_mono_ns: int | None = None) -> RtpPacket | None:
         try:
@@ -56,25 +58,27 @@ class RtpMetrics:
                 self._sequence_gaps += result.gap
             self._current_access_unit_bytes += len(data)
             if packet.marker:
+                access_unit_bytes = self._current_access_unit_bytes
                 self._access_units_observed += 1
-                self._access_unit_bytes_total += self._current_access_unit_bytes
-                self._access_unit_bytes_max = max(self._access_unit_bytes_max, self._current_access_unit_bytes)
+                self._access_unit_bytes_total += access_unit_bytes
+                self._access_unit_bytes_max = max(self._access_unit_bytes_max, access_unit_bytes)
                 self._current_access_unit_bytes = 0
-                self._access_unit_times.append(received)
+                self._recent_access_units.append((received, access_unit_bytes))
         return packet
 
     def snapshot(self) -> dict[str, int | float | None]:
         with self._lock:
             fps = None
-            if len(self._access_unit_times) >= 2:
-                duration_ns = self._access_unit_times[-1] - self._access_unit_times[0]
+            if len(self._recent_access_units) >= 2:
+                duration_ns = self._recent_access_units[-1][0] - self._recent_access_units[0][0]
                 if duration_ns > 0:
-                    fps = (len(self._access_unit_times) - 1) * 1_000_000_000 / duration_ns
+                    fps = (len(self._recent_access_units) - 1) * 1_000_000_000 / duration_ns
             bitrate = None
-            if len(self._access_unit_times) >= 2:
-                duration_ns = self._access_unit_times[-1] - self._access_unit_times[0]
+            if len(self._recent_access_units) >= 2:
+                duration_ns = self._recent_access_units[-1][0] - self._recent_access_units[0][0]
                 if duration_ns > 0:
-                    bitrate = self._access_unit_bytes_total * 8 * 1_000_000_000 / duration_ns
+                    recent_bytes = sum(size for _, size in self._recent_access_units)
+                    bitrate = recent_bytes * 8 * 1_000_000_000 / duration_ns
             average = None if not self._access_units_observed else self._access_unit_bytes_total / self._access_units_observed
             return {
                 "packets_received": self._packets_received,

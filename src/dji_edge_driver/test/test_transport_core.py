@@ -87,6 +87,22 @@ def test_rtp_metrics_classifies_wrap_gap_duplicate_and_access_units():
     assert snapshot["packets_rejected"] == 1
 
 
+def test_rtp_bitrate_uses_the_bounded_recent_measurement_window():
+    metrics = RtpMetrics(expected_payload_type=96)
+
+    def packet(sequence, payload):
+        return bytes([0x80, 0xE0]) + sequence.to_bytes(2, "big") + (123).to_bytes(4, "big") + (456).to_bytes(4, "big") + payload
+
+    # 121 access units force the oldest byte count out of the 120-AU window.
+    for sequence in range(121):
+        metrics.observe(packet(sequence, b"x" * (1000 if sequence == 0 else 1)), receive_mono_ns=sequence * 1_000_000_000)
+
+    snapshot = metrics.snapshot()
+    assert snapshot["estimated_fps"] == pytest.approx(1.0)
+    # The metric accounts for the complete RTP datagram: 12-byte header + 1 byte payload.
+    assert snapshot["estimated_bitrate_bps"] == pytest.approx(120 * 13 * 8 / 119)
+
+
 def test_raw_rtp_capture_uses_length_prefixed_records_and_is_opt_in(tmp_path):
     disabled = RawRtpCapture(None)
     assert disabled.enabled is False
