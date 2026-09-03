@@ -61,6 +61,16 @@ The dashboard is a local measurement/status surface, not a video renderer. Video
 
 It reports post-network Edge evidence: accepted/rejected JSON packets, clock state, NDJSON writer health, RTP bytes/packets/gaps/duplicates, access units, estimated FPS/bitrate, decoded resolution and frame count. The Android `health` telemetry remains the separate pre-network source of callback, parser and sender metrics.
 
+## ROS topic inventory
+
+The driver publishes the following direct-ingress topics:
+
+- Images: `/dji/primary/image_raw`, `/dji/fpv/image_raw` (`sensor_msgs/Image`, best-effort, depth 1).
+- Raw Android records: `/dji/telemetry/flight`, `/dji/telemetry/rtk`, `/dji/telemetry/gimbal`, `/dji/telemetry/frame_metadata`, and `/dji/telemetry/video_access_unit` (`std_msgs/String` containing compact JSON).
+- Navigation and health: `/dji/navigation/state` (`dji_edge_driver/NavigationState`), `/dji/diagnostics`, and `/dji/edge/transport_metrics` (`diagnostic_msgs/DiagnosticArray`).
+
+The mapper consumes `/dji/navigation/state` and publishes `/map/cloud`, `/dji/navigation/pose`, `/dji/navigation/path`, `/dji/navigation/status`, and `/tf`.
+
 ## Configuration
 
 The committed defaults are in [bridge.yaml](src/dji_edge_driver/config/bridge.yaml).
