@@ -24,6 +24,10 @@ install(PROGRAMS
   RENAME dji_edge_driver
 )
 
+install(PROGRAMS scripts/dji_edge_bringup.sh
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
