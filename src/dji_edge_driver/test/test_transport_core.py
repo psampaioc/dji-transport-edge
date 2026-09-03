@@ -5,6 +5,7 @@ import pytest
 
 from dji_edge_transport_core.clock import ClockMapper
 from dji_edge_transport_core.evidence import EvidenceWriter
+from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
 from dji_edge_transport_core.state import LatestState, SequenceTracker
@@ -103,3 +104,35 @@ def test_raw_rtp_capture_uses_length_prefixed_records_and_is_opt_in(tmp_path):
     second_at = 12 + first_size
     second_size = struct.unpack(">I", payload[second_at:second_at + 4])[0]
     assert payload[second_at + 4:second_at + 4 + second_size] == b"two-two"
+
+
+def test_navigation_prefers_active_rtk_but_keeps_aircraft_relative_altitude():
+    snapshot = {
+        "session": "session-a",
+        "flight": {
+            "android_mono_ns": 100,
+            "edge_receive_mono_ns": 150,
+            "mapped_edge_mono_ns": 140,
+            "data": {"fields": {"aircraft.latitude_deg": {"value": 38.0}, "aircraft.longitude_deg": {"value": -9.0}, "aircraft.altitude_m": {"value": 12.5}, "heading_deg": {"value": 42.0}, "velocity.north_m_s": {"value": 1.0}, "velocity.east_m_s": {"value": 2.0}, "velocity.down_m_s": {"value": 3.0}, "gps.signal_level": {"value": 5}}},
+        },
+        "rtk": {
+            "android_mono_ns": 110,
+            "edge_receive_mono_ns": 160,
+            "mapped_edge_mono_ns": 155,
+            "data": {"fields": {"fusion.latitude_deg": {"value": 38.1}, "fusion.longitude_deg": {"value": -9.1}, "is_being_used": {"value": True}}},
+        },
+    }
+    navigation = build_navigation(snapshot)
+    assert navigation["position_source"] == "rtk"
+    assert navigation["latitude_deg"] == 38.1
+    assert navigation["altitude_m"] == 12.5
+    assert navigation["transport_age_s"] == pytest.approx(5e-9)
+
+
+def test_navigation_falls_back_to_gps_and_rejects_missing_position():
+    gps_snapshot = {"session": "session-b", "rtk": None, "flight": {"android_mono_ns": 10, "edge_receive_mono_ns": 20, "mapped_edge_mono_ns": None, "data": {"fields": {"aircraft.latitude_deg": {"value": 37.0}, "aircraft.longitude_deg": {"value": -8.0}}}}}
+    navigation = build_navigation(gps_snapshot)
+    assert navigation["position_source"] == "gps_fallback"
+    assert navigation["rtk_valid"] is False
+    assert navigation["transport_age_s"] is None
+    assert build_navigation({"flight": None, "rtk": None}) is None
