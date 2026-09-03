@@ -1,9 +1,11 @@
 import json
 import struct
+from urllib.request import Request, urlopen
 
 import pytest
 
 from dji_edge_transport_core.clock import ClockMapper
+from dji_edge_transport_core.dashboard import DashboardServer
 from dji_edge_transport_core.evidence import EvidenceWriter
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet
@@ -136,3 +138,20 @@ def test_navigation_falls_back_to_gps_and_rejects_missing_position():
     assert navigation["rtk_valid"] is False
     assert navigation["transport_age_s"] is None
     assert build_navigation({"flight": None, "rtk": None}) is None
+
+
+def test_dashboard_serves_state_health_and_clean_exit_callback():
+    exits = []
+    dashboard = DashboardServer("127.0.0.1", 0, lambda: {"status": "ok", "video": []}, lambda: exits.append(True))
+    dashboard.start()
+    try:
+        base = f"http://127.0.0.1:{dashboard.port}"
+        assert json.loads(urlopen(f"{base}/v1/state", timeout=2).read()) == {"status": "ok", "video": []}
+        assert json.loads(urlopen(f"{base}/health", timeout=2).read())["status"] == "ok"
+        page = urlopen(f"{base}/", timeout=2).read().decode()
+        assert "DJI Transport Edge" in page
+        request = Request(f"{base}/v1/exit", method="POST")
+        assert json.loads(urlopen(request, timeout=2).read()) == {"stopping": True}
+        assert exits == [True]
+    finally:
+        dashboard.close()

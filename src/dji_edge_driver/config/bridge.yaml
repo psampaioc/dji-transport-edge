@@ -17,6 +17,9 @@
     android_clock_host: ""
     android_clock_port: 5502
     clock_ping_interval_s: 1.0
+    dashboard_enabled: true
+    dashboard_host: "127.0.0.1"
+    dashboard_port: 8090
     publish_video: true
     primary_topic: "/dji/primary/image_raw"
     fpv_topic: "/dji/fpv/image_raw"

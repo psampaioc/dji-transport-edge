@@ -11,6 +11,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from dji_edge_transport_core.protocol import CLOCK_TYPES, FRAME_TYPES, ProtocolError, decode_json_packet
 from dji_edge_transport_core.clock import ClockMapper
+from dji_edge_transport_core.dashboard import DashboardServer
 from dji_edge_transport_core.evidence import EvidenceWriter
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
@@ -74,7 +75,7 @@ class Video:
 class EdgeBridge(Node):
     def __init__(self):
         super().__init__("dji_edge_driver")
-        defaults={"bind_host":"0.0.0.0","telemetry_port":5500,"frame_metadata_port":5501,"clock_port":5502,"primary_rtp_port":5600,"fpv_rtp_port":5610,"max_json_bytes":1200,"rtp_payload_type":96,"rtp_latency_ms":20,"preview_windows":True,"publish_video":True,"capture_rtp":False,"evidence_dir":"evidence","android_clock_host":"","android_clock_port":5502,"clock_ping_interval_s":1.0,"primary_topic":"/dji/primary/image_raw","fpv_topic":"/dji/fpv/image_raw","navigation_topic":"/dji/navigation/state","flight_topic":"/dji/telemetry/flight","rtk_topic":"/dji/telemetry/rtk","gimbal_topic":"/dji/telemetry/gimbal","frame_metadata_topic":"/dji/telemetry/frame_metadata","diagnostics_topic":"/dji/diagnostics","transport_metrics_topic":"/dji/edge/transport_metrics"}
+        defaults={"bind_host":"0.0.0.0","telemetry_port":5500,"frame_metadata_port":5501,"clock_port":5502,"primary_rtp_port":5600,"fpv_rtp_port":5610,"max_json_bytes":1200,"rtp_payload_type":96,"rtp_latency_ms":20,"preview_windows":True,"publish_video":True,"capture_rtp":False,"evidence_dir":"evidence","android_clock_host":"","android_clock_port":5502,"clock_ping_interval_s":1.0,"dashboard_enabled":True,"dashboard_host":"127.0.0.1","dashboard_port":8090,"primary_topic":"/dji/primary/image_raw","fpv_topic":"/dji/fpv/image_raw","navigation_topic":"/dji/navigation/state","flight_topic":"/dji/telemetry/flight","rtk_topic":"/dji/telemetry/rtk","gimbal_topic":"/dji/telemetry/gimbal","frame_metadata_topic":"/dji/telemetry/frame_metadata","diagnostics_topic":"/dji/diagnostics","transport_metrics_topic":"/dji/edge/transport_metrics"}
         for k,v in defaults.items(): self.declare_parameter(k,v)
         p=lambda k:self.get_parameter(k).value
         for k in ("bind_host","max_json_bytes","rtp_payload_type","rtp_latency_ms","preview_windows"): setattr(self,k,p(k))
@@ -85,6 +86,10 @@ class EdgeBridge(Node):
         self.create_timer(1.0,self.publish_diagnostics)
         self.clock_host,self.clock_port,self.clock_interval=p("android_clock_host"),p("android_clock_port"),p("clock_ping_interval_s")
         self.clock_thread=threading.Thread(target=self.clock_loop,daemon=True); self.clock_thread.start()
+        self.stop_requested=threading.Event(); self.dashboard=None
+        if p("dashboard_enabled"):
+            self.dashboard=DashboardServer(p("dashboard_host"),p("dashboard_port"),self.dashboard_state,self.stop_requested.set); self.dashboard.start()
+            self.get_logger().info(f"dashboard=http://{p('dashboard_host')}:{self.dashboard.port}/")
     def ingest(self,category,data,remote,edge_ns,sock):
         try:
             packet=decode_json_packet(data,expected_version=1,max_bytes=self.max_json_bytes)
@@ -127,8 +132,14 @@ class EdgeBridge(Node):
         for v in self.videos:
             metrics=v.metrics.snapshot(); s.values += [KeyValue(key=f"{v.name}.frames",value=str(v.frames)),KeyValue(key=f"{v.name}.resolution",value=f"{v.width}x{v.height}"),KeyValue(key=f"{v.name}.error",value=v.error or ""),KeyValue(key=f"{v.name}.rtp_packets",value=str(metrics["packets_received"])),KeyValue(key=f"{v.name}.rtp_gaps",value=str(metrics["sequence_gaps"])),KeyValue(key=f"{v.name}.fps",value=str(metrics["estimated_fps"]))]
         a.status=[s]; self.diag.publish(a); self.metrics.publish(a)
+    def dashboard_state(self):
+        evidence=self.evidence.health(); videos=[]
+        for video in self.videos:
+            videos.append({"name":video.name,"frames":video.frames,"resolution":{"width":video.width,"height":video.height},"error":video.error,"rtp":video.metrics.snapshot(),"capture_rtp":video.capture.enabled})
+        return {"schema_version":1,"status":"ok" if not self.endpoint_errors else "degraded","evidence":{"path":str(self.evidence.root),**evidence},"clock":self.clock_mapper.estimate(),"transport":self.latest_state.snapshot()["transport"],"navigation":build_navigation(self.latest_state.snapshot()),"video":videos,"udp_errors":self.endpoint_errors}
     def destroy_node(self):
         self.clock_stop.set(); self.clock_thread.join(timeout=2)
+        if self.dashboard: self.dashboard.close()
         for e in self.inputs:e.close()
         for v in self.videos:v.close()
         self.evidence.close()
@@ -136,7 +147,8 @@ class EdgeBridge(Node):
 
 def main():
     rclpy.init(); n=EdgeBridge()
-    try:rclpy.spin(n)
+    try:
+        while rclpy.ok() and not n.stop_requested.is_set(): rclpy.spin_once(n,timeout_sec=.2)
     except (KeyboardInterrupt, ExternalShutdownException):pass
     finally:
         n.destroy_node()
