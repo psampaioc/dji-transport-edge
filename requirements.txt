@@ -1,3 +1,0 @@
-# Runtime Python dependencies: none (Python >= 3.11).
-# GStreamer is an external system dependency; see README.md.
-
