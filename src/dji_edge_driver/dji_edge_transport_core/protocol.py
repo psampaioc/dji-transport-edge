@@ -6,7 +6,15 @@ import math
 from typing import Any
 
 
-TELEMETRY_TYPES = {"telemetry", "flight", "rtk", "gimbal", "health", "hello"}
+TELEMETRY_TYPES = {
+    "telemetry",
+    "flight",
+    "rtk",
+    "gimbal",
+    "battery",
+    "health",
+    "hello",
+}
 FRAME_TYPES = {"frame_meta", "video_au"}
 CLOCK_TYPES = {"clock_ping", "clock_pong"}
 
@@ -148,4 +156,3 @@ def parse_rtp_packet(data: bytes, expected_payload_type: int | None = None) -> R
     if payload_size <= 0:
         raise ProtocolError("RTP packet has no payload")
     return RtpPacket(2, payload_type, bool(second & 0x80), int.from_bytes(data[2:4], "big"), int.from_bytes(data[4:8], "big"), int.from_bytes(data[8:12], "big"), header_size, payload_size)
-

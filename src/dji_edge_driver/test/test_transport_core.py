@@ -20,11 +20,12 @@ def test_golden_control_packets_decode_with_stable_envelopes():
         {"v": 1, "type": "flight", "session": "fixture-session-0001", "seq": 42, "rx_mono_ns": 1234567890123, "lat": 38.7223},
         {"v": 1, "type": "rtk", "session": "fixture-session-0001", "seq": 11, "rx_mono_ns": 1234567890220, "lat": 38.7223001},
         {"v": 1, "type": "gimbal", "session": "fixture-session-0001", "seq": 77, "rx_mono_ns": 1234567890330, "pitch_deg": -45.25},
+        {"v": 1, "type": "battery", "session": "fixture-session-0001", "seq": 5, "rx_mono_ns": 1234567890380, "percent": 93},
         {"v": 1, "type": "health", "session": "fixture-session-0001", "seq": 3, "rx_mono_ns": 1234567890440, "sender_drops": 0},
         {"v": 1, "type": "video_au", "session": "fixture-session-0001", "feed": "primary", "source": "FPV_CAM", "frame_seq": 9321, "rtp_ssrc": 305419896, "rtp_ts": 987654321, "au_first_byte_rx_mono_ns": 1234567890500, "au_complete_rx_mono_ns": 1234567891987},
     ]
     decoded = [decode_json_packet(json.dumps(packet).encode(), 1) for packet in packets]
-    assert [packet.packet_type for packet in decoded] == ["flight", "rtk", "gimbal", "health", "video_au"]
+    assert [packet.packet_type for packet in decoded] == ["flight", "rtk", "gimbal", "battery", "health", "video_au"]
     assert decoded[-1].stream == "primary"
     assert decoded[-1].body["rtp_ssrc"] == 305419896
 

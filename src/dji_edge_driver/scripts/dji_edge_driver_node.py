@@ -35,6 +35,7 @@ PARAMETERS = {
     "primary_topic": "/dji/primary/image_raw", "fpv_topic": "/dji/fpv/image_raw",
     "navigation_topic": "/dji/navigation/state", "flight_topic": "/dji/telemetry/flight",
     "rtk_topic": "/dji/telemetry/rtk", "gimbal_topic": "/dji/telemetry/gimbal",
+    "battery_topic": "/dji/telemetry/battery", "health_topic": "/dji/telemetry/health",
     "frame_metadata_topic": "/dji/telemetry/frame_metadata",
     "video_access_unit_topic": "/dji/telemetry/video_access_unit",
     "diagnostics_topic": "/dji/diagnostics",
@@ -171,6 +172,8 @@ class EdgeBridge(Node):
             "flight": self.create_publisher(String, self.parameter("flight_topic"), 10),
             "rtk": self.create_publisher(String, self.parameter("rtk_topic"), 10),
             "gimbal": self.create_publisher(String, self.parameter("gimbal_topic"), 10),
+            "battery": self.create_publisher(String, self.parameter("battery_topic"), 10),
+            "health": self.create_publisher(String, self.parameter("health_topic"), 10),
             "frame_meta": self.create_publisher(String, self.parameter("frame_metadata_topic"), 10),
             "video_au": self.create_publisher(String, self.parameter("video_access_unit_topic"), 10),
         }
