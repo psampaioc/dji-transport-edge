@@ -1,9 +1,12 @@
 import json
+import struct
 
 import pytest
 
 from dji_edge_transport_core.clock import ClockMapper
+from dji_edge_transport_core.evidence import EvidenceWriter
 from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet
+from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
 from dji_edge_transport_core.state import LatestState, SequenceTracker
 
 
@@ -44,3 +47,59 @@ def test_clock_and_rtp_contract_reject_invalid_data():
     assert parse_rtp_packet(rtp, 96).marker
     with pytest.raises(ProtocolError):
         parse_rtp_packet(rtp, 97)
+
+
+def test_evidence_writer_drains_ndjson_and_reports_write_health(tmp_path):
+    writer = EvidenceWriter(tmp_path, max_records=2)
+    writer.write("telemetry", {"sequence": 1, "kind": "flight"})
+    writer.write("telemetry", {"sequence": 2, "kind": "rtk"})
+    writer.close()
+
+    records = [json.loads(line) for line in (tmp_path / "telemetry.ndjson").read_text().splitlines()]
+    assert records == [{"kind": "flight", "sequence": 1}, {"kind": "rtk", "sequence": 2}]
+    assert writer.health()["queue_depth"] == 0
+    assert writer.health()["writer_alive"] is False
+    assert writer.health()["write_errors"] == 0
+
+
+def test_rtp_metrics_classifies_wrap_gap_duplicate_and_access_units():
+    metrics = RtpMetrics(expected_payload_type=96)
+
+    def packet(sequence, marker=False, payload=b"abc"):
+        return bytes([0x80, 0xE0 if marker else 0x60]) + sequence.to_bytes(2, "big") + (123).to_bytes(4, "big") + (456).to_bytes(4, "big") + payload
+
+    assert metrics.observe(packet(65535)) is not None
+    assert metrics.observe(packet(0, marker=True)) is not None
+    assert metrics.observe(packet(2, marker=True)) is not None
+    assert metrics.observe(packet(2, marker=True)) is not None
+    assert metrics.observe(b"bad") is None
+
+    snapshot = metrics.snapshot()
+    assert snapshot["packets_received"] == 4
+    assert snapshot["bytes_received"] == 60
+    assert snapshot["sequence_gaps"] == 1
+    assert snapshot["duplicates"] == 1
+    assert snapshot["access_units_observed"] == 2
+    assert snapshot["access_unit_bytes_total"] == 45
+    assert snapshot["packets_rejected"] == 1
+
+
+def test_raw_rtp_capture_uses_length_prefixed_records_and_is_opt_in(tmp_path):
+    disabled = RawRtpCapture(None)
+    assert disabled.enabled is False
+    assert disabled.write(b"ignored") is False
+
+    path = tmp_path / "primary.rtpbin"
+    capture = RawRtpCapture(path)
+    assert capture.enabled is True
+    assert capture.write(b"one") is True
+    assert capture.write(b"two-two") is True
+    capture.close()
+
+    payload = path.read_bytes()
+    assert payload[:8] == b"DJIRTP01"
+    first_size = struct.unpack(">I", payload[8:12])[0]
+    assert payload[12:12 + first_size] == b"one"
+    second_at = 12 + first_size
+    second_size = struct.unpack(">I", payload[second_at:second_at + 4])[0]
+    assert payload[second_at + 4:second_at + 4 + second_size] == b"two-two"
