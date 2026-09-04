@@ -11,7 +11,9 @@
 /drone_localization_node:
   ros__parameters:
     navigation_topic: "/dji/navigation/state"
+    frame_context_topic: "/dji/primary/frame_context"
     pose_topic: "/dji/navigation/pose"
+    frame_pose_topic: "/dji/frame/pose"
     path_topic: "/dji/navigation/path"
     status_topic: "/dji/navigation/status"
     frame_id: "map"
