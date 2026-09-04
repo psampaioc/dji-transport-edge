@@ -41,6 +41,10 @@ def main() -> None:
         time.sleep(min(args.interval_s, remaining))
 
     successful = [sample["state"] for sample in samples if sample["state"] is not None]
+    last_video = (successful[-1].get("video", []) if successful else [])
+    association_summary = {
+        video.get("name", "unknown"): video.get("context", {}) for video in last_video
+    }
     report = {
         "schema_version": 1,
         "started_utc": samples[0]["captured_utc"],
@@ -50,6 +54,7 @@ def main() -> None:
         "successful_samples": len(successful),
         "first_state": successful[0] if successful else None,
         "last_state": successful[-1] if successful else None,
+        "association_summary": association_summary,
         "samples": samples,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
