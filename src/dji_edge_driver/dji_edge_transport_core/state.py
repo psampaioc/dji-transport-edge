@@ -8,7 +8,8 @@ import time
 from typing import Any
 
 from .clock import ClockMapper
-from .protocol import Packet
+from .protocol import Packet, video_au_identity
+from .synchronization import TemporalCorrelation
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class LatestState:
         self._history: dict[str, deque[dict]] = {}
         self._frames: dict[str, dict] = {}
         self._partial: dict[tuple[str, str, int], dict] = {}
+        self.correlation = TemporalCorrelation()
         self._transport: dict[str, Any] = {"accepted_packets": 0, "rejected_packets": 0, "duplicates": 0, "out_of_order": 0, "sequence_gaps": 0}
 
     def update_packet(self, packet: Packet, edge_receive_ns: int, remote: tuple[str, int], sequence: SequenceResult) -> bool:
@@ -70,6 +72,7 @@ class LatestState:
             if self._session is not None and self._session != packet.session:
                 self._sources.clear(); self._history.clear(); self._frames.clear(); self._partial.clear()
             self._session = packet.session
+            self.correlation.start_session(packet.session)
             self._transport["accepted_packets"] += 1
             if sequence.disposition == "duplicate": self._transport["duplicates"] += 1
             elif sequence.disposition == "out_of_order": self._transport["out_of_order"] += 1
@@ -77,6 +80,21 @@ class LatestState:
             if not sequence.is_newest:
                 return False
             if packet.packet_type in {"frame_meta", "video_au"}:
+                if packet.packet_type == "video_au":
+                    try:
+                        identity = video_au_identity(packet)
+                    except ValueError:
+                        self._transport["rejected_packets"] += 1
+                        return False
+                    self.correlation.add_access_unit(identity)
+                    record["identity"] = {
+                        "session": identity.session, "feed": identity.feed, "frame_seq": identity.frame_seq,
+                        "rtp_ssrc": identity.rtp_ssrc, "rtp_ts": identity.rtp_ts,
+                        "android_first_byte_mono_ns": identity.android_first_byte_mono_ns,
+                        "android_complete_mono_ns": identity.android_complete_mono_ns,
+                        "dji_source_timestamp_ns": identity.dji_source_timestamp_ns,
+                        "dji_timestamp_source": identity.dji_timestamp_source,
+                    }
                 self._frames[packet.stream] = record
                 return True
             body = packet.body
@@ -100,6 +118,7 @@ class LatestState:
                 del self._partial[key]
             self._sources[packet.stream] = record
             self._history.setdefault(packet.stream, deque(maxlen=512)).append(deepcopy(record))
+            self.correlation.add_telemetry(packet.packet_type, deepcopy(record))
             return True
 
     def reject(self) -> None:
@@ -119,4 +138,4 @@ class LatestState:
             frame["telemetry_associations"] = associations
         typed = lambda name: [value for value in sources.values() if value["type"] == name]
         flight, rtk, gimbal, health = typed("flight"), typed("rtk"), typed("gimbal"), typed("health")
-        return {"schema_version": 1, "session": session, "edge_mono_ns": now, "flight": flight[-1] if flight else None, "rtk": rtk[-1] if rtk else None, "gimbal": gimbal[-1] if gimbal else None, "health": health[-1] if health else None, "sources": sources, "video_frames": frames, "clock": self._clock_mapper.estimate(), "transport": transport}
+        return {"schema_version": 1, "session": session, "edge_mono_ns": now, "flight": flight[-1] if flight else None, "rtk": rtk[-1] if rtk else None, "gimbal": gimbal[-1] if gimbal else None, "health": health[-1] if health else None, "sources": sources, "video_frames": frames, "clock": self._clock_mapper.estimate(), "transport": transport, "correlation": self.correlation.snapshot()}

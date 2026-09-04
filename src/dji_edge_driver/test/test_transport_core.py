@@ -11,6 +11,7 @@ from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet, video_au_identity
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
 from dji_edge_transport_core.state import LatestState, SequenceTracker
+from dji_edge_transport_core.synchronization import TemporalCorrelation
 from dji_edge_transport_core.video import LatestFrameBuffer
 
 
@@ -208,6 +209,57 @@ def test_navigation_falls_back_to_gps_and_rejects_missing_position():
     assert navigation["gimbal_pitch_valid"] is False
     assert navigation["transport_age_s"] is None
     assert build_navigation({"flight": None, "rtk": None}) is None
+
+
+def test_temporal_correlation_interpolates_frame_navigation_and_heading_wrap():
+    correlation = TemporalCorrelation(max_samples=8, max_gap_ns=1_000)
+    correlation.start_session("s")
+    correlation.add_telemetry("flight", {"android_mono_ns": 100, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.0}, "aircraft.longitude_deg": {"value": -9.0},
+        "aircraft.altitude_m": {"value": 10.0}, "heading_deg": {"value": 350.0},
+    }}})
+    correlation.add_telemetry("flight", {"android_mono_ns": 300, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.2}, "aircraft.longitude_deg": {"value": -8.8},
+        "aircraft.altitude_m": {"value": 14.0}, "heading_deg": {"value": 10.0},
+    }}})
+    correlation.add_telemetry("gimbal", {"android_mono_ns": 100, "data": {"fields": {"attitude.pitch_deg": {"value": -40.0}}}})
+    correlation.add_telemetry("gimbal", {"android_mono_ns": 300, "data": {"fields": {"attitude.pitch_deg": {"value": -20.0}}}})
+    context = correlation.associate_android_time(200)
+    assert context["association_quality"] == "interpolated"
+    assert context["position_source"] == "gps_fallback"
+    assert context["latitude_deg"] == pytest.approx(38.1)
+    assert context["altitude_m"] == pytest.approx(12.0)
+    assert context["heading_deg"] == pytest.approx(0.0)
+    assert context["gimbal_pitch_deg"] == pytest.approx(-30.0)
+
+
+def test_temporal_correlation_prefers_relevant_rtk_and_fails_closed_when_stale():
+    correlation = TemporalCorrelation(max_samples=4, max_gap_ns=100)
+    correlation.start_session("s")
+    correlation.add_telemetry("flight", {"android_mono_ns": 100, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.0}, "aircraft.longitude_deg": {"value": -9.0},
+        "aircraft.altitude_m": {"value": 10.0}, "heading_deg": {"value": 10.0},
+    }}})
+    correlation.add_telemetry("rtk", {"android_mono_ns": 100, "data": {"fields": {
+        "fusion.latitude_deg": {"value": 38.01}, "fusion.longitude_deg": {"value": -9.01}, "is_being_used": {"value": True},
+    }}})
+    selected = correlation.associate_android_time(110)
+    assert selected["association_quality"] == "nearest"
+    assert selected["position_source"] == "rtk"
+    assert selected["latitude_deg"] == pytest.approx(38.01)
+    stale = correlation.associate_android_time(1_000)
+    assert stale["association_quality"] == "unavailable"
+    assert stale["position_valid"] is False
+
+
+def test_temporal_correlation_is_bounded_and_clears_on_session_change():
+    correlation = TemporalCorrelation(max_samples=2, max_gap_ns=100)
+    correlation.start_session("first")
+    for timestamp in (1, 2, 3):
+        correlation.add_telemetry("flight", {"android_mono_ns": timestamp, "data": {"fields": {}}})
+    assert correlation.snapshot()["history_sizes"]["flight"] == 2
+    correlation.start_session("second")
+    assert correlation.snapshot()["history_sizes"]["flight"] == 0
 
 
 def test_dashboard_serves_state_health_and_clean_exit_callback():
