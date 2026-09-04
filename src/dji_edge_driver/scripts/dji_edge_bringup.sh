@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eo pipefail
+set -o pipefail
 
 workspace=/workspace
 source /opt/ros/humble/setup.bash
@@ -11,8 +11,11 @@ fi
 source "$workspace/install/setup.bash"
 restart_marker="$workspace/.runtime/dji-edge-restart.request"
 while true; do
-  ros2 launch dji_edge_driver dji_edge_bringup.launch.py "$@"
-  exit_code=$?
+  if ros2 launch dji_edge_driver dji_edge_bringup.launch.py "$@"; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
   if [ -f "$restart_marker" ]; then
     rm -f "$restart_marker"
     echo "Dashboard requested restart; relaunching managed Edge stack."
