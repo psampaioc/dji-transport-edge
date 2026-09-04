@@ -27,6 +27,12 @@ def reliable_qos(transient=False):
     return qos
 
 
+def best_effort_qos():
+    qos = QoSProfile(depth=1)
+    qos.reliability = ReliabilityPolicy.BEST_EFFORT
+    return qos
+
+
 def finite(value):
     return isinstance(value, (int, float)) and math.isfinite(value)
 
@@ -91,7 +97,7 @@ class DroneLocalizationNode(Node):
         self.path_pub = self.create_publisher(PathMessage, p("path_topic"), reliable_qos(transient=True))
         self.status_pub = self.create_publisher(String, p("status_topic"), reliable_qos(transient=True))
         self.create_subscription(NavigationState, p("navigation_topic"), self.on_navigation, reliable_qos())
-        self.create_subscription(FrameContext, p("frame_context_topic"), self.on_frame_context, reliable_qos())
+        self.create_subscription(FrameContext, p("frame_context_topic"), self.on_frame_context, best_effort_qos())
         self.create_timer(1.0, self.publish_status)
         self.get_logger().info(
             f"Localization online: {p('navigation_topic')} -> pose={p('pose_topic')} path={p('path_topic')} frame={self.frame_id}"

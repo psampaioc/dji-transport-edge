@@ -55,7 +55,15 @@ source install/setup.bash
 ros2 launch dji_edge_driver dji_edge_bringup.launch.py
 ```
 
-The launch starts the driver, mapper, dashboard and both native GStreamer previews. The terminal remains attached to the pipeline. `djiedge-run` is an optional host convenience command with the same build/source/launch sequence.
+The launch starts the driver, mapper, dashboard, both native GStreamer previews, and the preconfigured RViz view. RViz shows the Primary ROS image, the map, cyan continuous path, and yellow frame-synchronous pose. The terminal remains attached to the pipeline. `djiedge-run` is an optional host convenience command with the same build/source/launch sequence.
+
+For headless Docker checks or a machine without X11, keep the exact same transport/map bringup and disable only RViz:
+
+```bash
+ros2 launch dji_edge_driver dji_edge_bringup.launch.py rviz:=false preview_windows:=false
+```
+
+Without an ignored local map configuration, RViz still opens and the driver/dashboard/video work, but the map/localization topics are intentionally disabled.
 
 Open the dashboard at [http://127.0.0.1:8090](http://127.0.0.1:8090). Its **Exit** button stops the driver and the ROS launch then closes the mapper and container. `Ctrl-C` in the `djiedge` terminal has the same intent.
 

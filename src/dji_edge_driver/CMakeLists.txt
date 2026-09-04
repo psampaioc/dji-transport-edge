@@ -18,6 +18,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_transport_core test/test_transport_core.py)
   ament_add_pytest_test(test_gstreamer_pts test/test_gstreamer_pts.py)
+  ament_add_pytest_test(test_bringup_launch test/test_bringup_launch.py)
 endif()
 
 install(PROGRAMS
