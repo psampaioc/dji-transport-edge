@@ -9,4 +9,14 @@ if [ ! -f "$workspace/install/setup.bash" ]; then
   exit 2
 fi
 source "$workspace/install/setup.bash"
-exec ros2 launch dji_edge_driver dji_edge_bringup.launch.py "$@"
+restart_marker="$workspace/.runtime/dji-edge-restart.request"
+while true; do
+  ros2 launch dji_edge_driver dji_edge_bringup.launch.py "$@"
+  exit_code=$?
+  if [ -f "$restart_marker" ]; then
+    rm -f "$restart_marker"
+    echo "Dashboard requested restart; relaunching managed Edge stack."
+    continue
+  fi
+  exit "$exit_code"
+done

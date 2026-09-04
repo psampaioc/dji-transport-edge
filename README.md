@@ -102,13 +102,17 @@ The committed defaults are in [bridge.yaml](src/dji_edge_driver/config/bridge.ya
 - `preview_windows: true` starts Primary and FPV GStreamer windows.
 - `capture_rtp: false` is the normal setting. NDJSON evidence is always on.
 
-To keep local configuration out of Git, copy the file and pass it to launch from a shell:
+The dashboard writes only `android_clock_host`, `capture_rtp`, and `preview_windows` to the ignored `/workspace/bridge.local.yaml`. It shows the local Ubuntu IPv4 addresses to copy into the tablet and never exposes ports, paths, shell commands, or flight controls. **Save** persists for the next launch; **Save and restart** persists then restarts the managed Edge stack once.
+
+You can also create the same local configuration manually:
 
 ```bash
 cp src/dji_edge_driver/config/bridge.yaml bridge.local.yaml
 ```
 
-Then use the Humble shell and pass `driver_config_file:=/workspace/bridge.local.yaml` to the launch command. The normal `djiedge` path currently uses the committed configuration directly.
+The normal package launcher automatically prefers this ignored file when it exists. Delete it to return to committed defaults.
+
+`djiedge-run` uses this managed launcher, so dashboard **Save and restart** returns to the same command session after one clean shutdown. If launching manually inside `djiedge`, use `ros2 run dji_edge_driver dji_edge_bringup` rather than invoking `ros2 launch` directly.
 
 ## Evidence and recording
 

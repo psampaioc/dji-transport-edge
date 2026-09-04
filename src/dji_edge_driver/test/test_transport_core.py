@@ -7,6 +7,7 @@ import pytest
 from dji_edge_transport_core.clock import ClockMapper
 from dji_edge_transport_core.dashboard import DashboardServer
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
+from dji_edge_transport_core.local_config import atomic_write, validate
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet, video_au_identity
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
@@ -312,3 +313,41 @@ def test_dashboard_serves_state_health_and_clean_exit_callback():
         assert exits == [True]
     finally:
         dashboard.close()
+
+
+def test_dashboard_configuration_api_calls_only_validated_saver():
+    saved = []
+    dashboard = DashboardServer(
+        "127.0.0.1", 0, lambda: {"status": "ok", "video": []}, lambda: None,
+        lambda: {"values": {"android_clock_host": "", "capture_rtp": False, "preview_windows": True}},
+        lambda values, restart: saved.append((values, restart)) or {"status": "saved", "restarting": restart},
+    )
+    dashboard.start()
+    try:
+        base = f"http://127.0.0.1:{dashboard.port}"
+        assert json.loads(urlopen(f"{base}/v1/config", timeout=2).read())["values"]["capture_rtp"] is False
+        request = Request(f"{base}/v1/config", data=json.dumps({"values": {"android_clock_host": "192.168.1.2", "capture_rtp": True, "preview_windows": False}, "restart": True}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+        assert json.loads(urlopen(request, timeout=2).read())["restarting"] is True
+        assert saved == [({"android_clock_host": "192.168.1.2", "capture_rtp": True, "preview_windows": False}, True)]
+    finally:
+        dashboard.close()
+
+
+def test_local_dashboard_config_validates_and_writes_atomically(tmp_path):
+    target = tmp_path / "bridge.local.yaml"
+    values = {"android_clock_host": "192.168.1.151", "capture_rtp": True, "preview_windows": False}
+    atomic_write(target, values)
+    assert 'android_clock_host: "192.168.1.151"' in target.read_text()
+    before = target.read_text()
+    with pytest.raises(ValueError):
+        atomic_write(target, {"android_clock_host": "bad host!", "capture_rtp": True, "preview_windows": False})
+    assert target.read_text() == before
+
+
+@pytest.mark.parametrize("values", [
+    {"android_clock_host": "", "capture_rtp": "true", "preview_windows": False},
+    {"android_clock_host": "127.0.0.1", "capture_rtp": False, "preview_windows": True, "port": 5600},
+])
+def test_local_dashboard_config_rejects_outside_allowlist(values):
+    with pytest.raises(ValueError):
+        validate(values)

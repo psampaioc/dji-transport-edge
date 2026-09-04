@@ -2,6 +2,7 @@
 """Direct Android UDP/RTP ingestion; no HTTP polling or loopback relay."""
 
 import json
+from pathlib import Path
 import socket
 import threading
 import time
@@ -17,6 +18,7 @@ from sensor_msgs.msg import Image
 from dji_edge_transport_core.clock import ClockMapper
 from dji_edge_transport_core.dashboard import DashboardServer
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
+from dji_edge_transport_core.local_config import atomic_write, validate
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import CLOCK_TYPES, FRAME_TYPES, ProtocolError, decode_json_packet, parse_rtp_packet
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
@@ -37,6 +39,7 @@ PARAMETERS = {
     "navigation_topic": "/dji/navigation/state",
     "diagnostics_topic": "/dji/diagnostics",
     "transport_metrics_topic": "/dji/edge/transport_metrics",
+    "local_config_path": "/workspace/bridge.local.yaml", "restart_request_path": "/workspace/.runtime/dji-edge-restart.request",
 }
 
 
@@ -272,10 +275,40 @@ class EdgeBridge(Node):
         if not self.parameter("dashboard_enabled"):
             return None
         host = self.parameter("dashboard_host")
-        dashboard = DashboardServer(host, self.parameter("dashboard_port"), self.dashboard_state, self.stop_requested.set)
+        dashboard = DashboardServer(host, self.parameter("dashboard_port"), self.dashboard_state, self.stop_requested.set, self.dashboard_config, self.save_dashboard_config)
         dashboard.start()
         self.get_logger().info(f"dashboard=http://{host}:{dashboard.port}/")
         return dashboard
+
+    def dashboard_config(self):
+        addresses = set()
+        try:
+            for family, _, _, _, sockaddr in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                if family == socket.AF_INET and not sockaddr[0].startswith("127."):
+                    addresses.add(sockaddr[0])
+        except OSError:
+            pass
+        return {
+            "source": self.parameter("local_config_path") if Path(self.parameter("local_config_path")).exists() else "committed defaults",
+            "values": {
+                "android_clock_host": self.clock_host,
+                "capture_rtp": self.parameter("capture_rtp"),
+                "preview_windows": self.preview_windows,
+            },
+            "ubuntu_ipv4": sorted(addresses),
+        }
+
+    def save_dashboard_config(self, values, restart):
+        values = validate(values)
+        target = atomic_write(self.parameter("local_config_path"), values)
+        result = {"status": "saved", "source": str(target), "restarting": False}
+        if restart:
+            marker = Path(self.parameter("restart_request_path"))
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("dashboard restart requested\n", encoding="utf-8")
+            result["status"], result["restarting"] = "saved; restarting managed stack", True
+            self.stop_requested.set()
+        return result
 
     def ingest(self, category, data, remote, edge_receive_ns, response_socket):
         try:
