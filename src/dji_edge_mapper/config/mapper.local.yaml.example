@@ -1,0 +1,30 @@
+# Copy to mapper.local.yaml, then set your own map files and calibration.
+# This file is intentionally generic and must not be used for navigation as-is.
+/map_publisher:
+  ros__parameters:
+    enabled: true
+    pcd_file_path: "config/map_vis.pcd"
+    map_frame: "map"
+    topic_name: "/map/cloud"
+    publish_once: true
+
+/drone_localization_node:
+  ros__parameters:
+    enabled: true
+    navigation_topic: "/dji/navigation/state"
+    pose_topic: "/dji/navigation/pose"
+    path_topic: "/dji/navigation/path"
+    status_topic: "/dji/navigation/status"
+    frame_id: "map"
+    child_frame: "dji_aircraft"
+    utm_zone: 1
+    utm_south: false
+    map_metadata_path: "config/map_metadata.json"
+    enable_map_bounds_check: true
+    map_margin_m: 5.0
+    enable_jump_gate: true
+    max_speed_mps: 20.0
+    max_gate_dt_s: 10.0
+    position_tolerance_m: 2.0
+    min_path_spacing_m: 0.15
+    max_history_points: 5000

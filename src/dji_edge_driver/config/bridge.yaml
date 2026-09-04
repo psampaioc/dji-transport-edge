@@ -1,0 +1,28 @@
+/dji_edge_driver:
+  ros__parameters:
+    # Direct Android protocol ports; do not change without Android evidence.
+    bind_host: "0.0.0.0"
+    telemetry_port: 5500
+    frame_metadata_port: 5501
+    clock_port: 5502
+    primary_rtp_port: 5600
+    fpv_rtp_port: 5610
+    max_json_bytes: 1200
+    rtp_payload_type: 96
+    rtp_latency_ms: 20
+    preview_windows: true
+    # Disabled by default: this writes diagnostic RTP records under evidence_dir.
+    capture_rtp: false
+    evidence_dir: "evidence"
+    android_clock_host: ""
+    android_clock_port: 5502
+    clock_ping_interval_s: 1.0
+    dashboard_enabled: true
+    dashboard_host: "127.0.0.1"
+    dashboard_port: 8090
+    publish_video: true
+    primary_topic: "/dji/primary/image_raw"
+    fpv_topic: "/dji/fpv/image_raw"
+    navigation_topic: "/dji/navigation/state"
+    diagnostics_topic: "/dji/diagnostics"
+    transport_metrics_topic: "/dji/edge/transport_metrics"

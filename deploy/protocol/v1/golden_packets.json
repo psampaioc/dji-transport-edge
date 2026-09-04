@@ -1,0 +1,101 @@
+{
+  "protocol": "matrice-transport-v1",
+  "max_datagram_bytes": 1200,
+  "telemetry_json": [
+    {
+      "v": 1,
+      "type": "flight",
+      "session": "fixture-session-0001",
+      "seq": 42,
+      "rx_mono_ns": 1234567890123,
+      "rx_utc_ns": 1787654321000000000,
+      "source_ts_ns": null,
+      "lat": 38.7223,
+      "lon": -9.1393,
+      "alt_m": 12.5,
+      "vel_mps": [
+        1.25,
+        -0.5,
+        0.0
+      ],
+      "heading_deg": 359.5,
+      "flight_mode": "GPS_ATTI",
+      "gps_signal": 5,
+      "satellites": 17,
+      "is_flying": false,
+      "motors_on": false,
+      "valid": true
+    },
+    {
+      "v": 1,
+      "type": "rtk",
+      "session": "fixture-session-0001",
+      "seq": 11,
+      "rx_mono_ns": 1234567890220,
+      "rx_utc_ns": 1787654321000001097,
+      "source_ts_ns": null,
+      "lat": 38.7223001,
+      "lon": -9.1392999,
+      "alt_m": 13.1,
+      "solution": "FIXED_POINT",
+      "heading_solution": "FIXED_POINT",
+      "is_rtk_used": true,
+      "valid": true
+    },
+    {
+      "v": 1,
+      "type": "gimbal",
+      "session": "fixture-session-0001",
+      "seq": 77,
+      "rx_mono_ns": 1234567890330,
+      "rx_utc_ns": 1787654321000001207,
+      "source_ts_ns": null,
+      "index": 0,
+      "pitch_deg": -45.25,
+      "roll_deg": 0.1,
+      "yaw_deg": 179.9,
+      "mode": "YAW_FOLLOW",
+      "connected": true,
+      "valid": true
+    },
+    {
+      "v": 1,
+      "type": "health",
+      "session": "fixture-session-0001",
+      "seq": 3,
+      "rx_mono_ns": 1234567890440,
+      "rx_utc_ns": 1787654321000001317,
+      "sender_drops": 0,
+      "serialization_errors": 0,
+      "socket_errors": 0
+    },
+    {
+      "v": 1,
+      "type": "video_au",
+      "session": "fixture-session-0001",
+      "feed": "primary",
+      "source": "FPV_CAM",
+      "frame_seq": 9321,
+      "rtp_ssrc": 305419896,
+      "rtp_ts": 987654321,
+      "au_first_byte_rx_mono_ns": 1234567890500,
+      "au_complete_rx_mono_ns": 1234567891987,
+      "idr": true,
+      "bytes": 24873
+    }
+  ],
+  "rtp_h264": [
+    {
+      "name": "sps-single-nal",
+      "base64": "gGAD6DreaLESNFZ4Z0LAH9oCgLf+BQE="
+    },
+    {
+      "name": "idr-fua-start",
+      "base64": "gGAD6TreaLESNFZ4fIUBAgMEBQYHCAkKCwwNDg8Q"
+    },
+    {
+      "name": "idr-fua-end",
+      "base64": "gOAD6jreaLESNFZ4fEUREhMUFRYXGBkaGxwdHh8g"
+    }
+  ]
+}
