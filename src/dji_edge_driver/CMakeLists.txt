@@ -17,6 +17,7 @@ ament_python_install_package(dji_edge_transport_core)
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_transport_core test/test_transport_core.py)
+  ament_add_pytest_test(test_gstreamer_pts test/test_gstreamer_pts.py)
 endif()
 
 install(PROGRAMS

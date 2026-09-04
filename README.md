@@ -80,10 +80,10 @@ It reports post-network Edge evidence: accepted/rejected JSON packets, clock sta
 
 The driver publishes the following direct-ingress topics:
 
-- Images: `/dji/primary/image_raw`, `/dji/fpv/image_raw` (`sensor_msgs/Image`, best-effort, depth 1).
+- Images: `/dji/primary/image_raw`, `/dji/fpv/image_raw` (`sensor_msgs/Image`, best-effort, depth 1), each with its matching `FrameContext` on `/dji/primary/frame_context` and `/dji/fpv/frame_context`.
 - Navigation and health: `/dji/navigation/state` (`dji_edge_driver/NavigationState`), `/dji/diagnostics`, and `/dji/edge/transport_metrics` (`diagnostic_msgs/DiagnosticArray`). Raw Android packets remain evidence/dashboard diagnostics rather than ROS topics.
 
-The mapper consumes `/dji/navigation/state` and publishes `/map/cloud`, `/dji/navigation/pose`, `/dji/navigation/path`, `/dji/navigation/status`, and `/tf`.
+The mapper consumes navigation plus Primary frame context and publishes `/map/cloud`, the continuous `/dji/navigation/pose` and `/dji/navigation/path`, the frame-synchronous `/dji/frame/pose`, `/dji/navigation/status`, and `/tf`.
 
 ## Configuration
 
@@ -106,7 +106,7 @@ Then use the Humble shell and pass `driver_config_file:=/workspace/bridge.local.
 
 `evidence/edge-<UTC>-<id>/` is created beside the workspace for every driver run.
 
-- NDJSON is always on: telemetry, frame metadata, clock exchanges and protocol errors are written asynchronously and do not block UDP ingress.
+- NDJSON is always on: telemetry, frame metadata, frame-context associations, clock exchanges and protocol errors are written asynchronously and do not block UDP ingress. Android source times and Edge decode observations are separate fields.
 - Raw RTP is opt-in: set `capture_rtp: true` only for a short props-off diagnostic session. It creates `primary.rtpbin` and `fpv.rtpbin` inside that same session, with `DJIRTP01` magic and a 4-byte big-endian length before each RTP datagram. It is packet evidence, not a video file or a rosbag.
 - Use `rosbag2` separately when you need to replay ROS topics as a complete ROS session. It records published ROS messages, whereas raw RTP capture preserves the original post-network encoded datagrams for transport/H.264 investigation.
 
@@ -117,6 +117,8 @@ The Dockerized full bringup has been smoke-tested without the tablet: it builds 
 A synthetic H.264/RTP Primary source was also received directly on UDP `5600`, decoded at `1280x720` and approximately `30 FPS`, and published as ROS images. Its old-frame counter increased under the synthetic producer, which proves the ROS handoff replaces stale frames instead of accumulating a queue.
 
 This does not replace a props-off tablet/drone bench: that bench must verify actual Android ingress, Primary quality/latency, the first failing FPV boundary, GPS/RTK selection, and gimbal pitch.
+
+The source-time association code has deterministic unit coverage. Its fully synthetic H.264/RTP GStreamer characterization is skipped in the current Humble image because it intentionally has no `x264enc` fixture encoder; the actual props-off bench remains the required proof that Android RTP timestamps map to decoded frames for both feeds.
 
 ## Props-off hardware bench
 

@@ -12,7 +12,7 @@ from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, 
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
 from dji_edge_transport_core.state import LatestState, SequenceTracker
 from dji_edge_transport_core.synchronization import TemporalCorrelation
-from dji_edge_transport_core.video import LatestFrameBuffer
+from dji_edge_transport_core.video import LatestFrameBuffer, RtpPtsBinding
 
 
 def test_golden_control_packets_decode_with_stable_envelopes():
@@ -110,6 +110,17 @@ def test_latest_frame_buffer_replaces_stale_frames_without_queueing():
     frames.put("discard")
     frames.clear()
     assert frames.take() is None
+
+
+def test_rtp_pts_binding_fails_closed_for_missing_or_ambiguous_pipeline_time():
+    binding = RtpPtsBinding(max_entries=2)
+    assert binding.observe(101, 7, 11) is True
+    assert binding.resolve(101) == (7, 11)
+    assert binding.resolve(999) is None
+    assert binding.observe(102, 7, 12) is True
+    assert binding.observe(102, 7, 13) is False
+    assert binding.resolve(102) is None
+    assert binding.snapshot()["ambiguous"] == 1
 
 
 def test_rtp_metrics_classifies_wrap_gap_duplicate_and_access_units():
@@ -260,6 +271,29 @@ def test_temporal_correlation_is_bounded_and_clears_on_session_change():
     assert correlation.snapshot()["history_sizes"]["flight"] == 2
     correlation.start_session("second")
     assert correlation.snapshot()["history_sizes"]["flight"] == 0
+
+
+def test_latest_state_associates_rtp_au_to_frame_time_not_latest_state():
+    state, sequences = LatestState(ClockMapper()), SequenceTracker()
+
+    def ingest(raw, received):
+        packet = decode_json_packet(json.dumps(raw).encode(), 1)
+        sequence = sequences.observe((packet.session, packet.packet_type, packet.stream), packet.sequence)
+        assert state.update_packet(packet, received, ("127.0.0.1", 5500), sequence)
+
+    common = {"v": 1, "session": "s", "stream": "flight:0"}
+    ingest({**common, "type": "flight", "seq": 1, "rx_mono_ns": 100, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.0}, "aircraft.longitude_deg": {"value": -9.0}, "aircraft.altitude_m": {"value": 10.0}, "heading_deg": {"value": 5.0},
+    }}}, 200)
+    ingest({**common, "type": "flight", "seq": 2, "rx_mono_ns": 300, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.2}, "aircraft.longitude_deg": {"value": -8.8}, "aircraft.altitude_m": {"value": 14.0}, "heading_deg": {"value": 15.0},
+    }}}, 400)
+    ingest({"v": 1, "type": "video_au", "session": "s", "feed": "primary", "frame_seq": 7, "rtp_ssrc": 88, "rtp_ts": 99, "au_first_byte_rx_mono_ns": 190, "au_complete_rx_mono_ns": 200}, 500)
+    identity, navigation = state.associate_frame("primary", 88, 99)
+    assert identity["frame_seq"] == 7
+    assert navigation["latitude_deg"] == pytest.approx(38.1)
+    assert navigation["heading_deg"] == pytest.approx(10.0)
+    assert state.associate_frame("primary", 88, 100) is None
 
 
 def test_dashboard_serves_state_health_and_clean_exit_callback():

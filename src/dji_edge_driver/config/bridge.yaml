@@ -23,6 +23,8 @@
     publish_video: true
     primary_topic: "/dji/primary/image_raw"
     fpv_topic: "/dji/fpv/image_raw"
+    primary_context_topic: "/dji/primary/frame_context"
+    fpv_context_topic: "/dji/fpv/frame_context"
     navigation_topic: "/dji/navigation/state"
     diagnostics_topic: "/dji/diagnostics"
     transport_metrics_topic: "/dji/edge/transport_metrics"

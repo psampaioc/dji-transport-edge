@@ -8,6 +8,7 @@ Panels:
         - /Map Cloud1
         - /Drone Path1
         - /Drone Pose1
+        - /Frame-Synchronous Pose1
         - /Drone Camera1
       Splitter Ratio: 0.5
     Tree Height: 699
@@ -69,6 +70,26 @@ Visualization Manager:
         Value: /map/cloud
       Use Fixed Frame: true
       Use rainbow: true
+      Value: true
+    - Alpha: 1
+      Axes Length: 3
+      Axes Radius: 0.18
+      Class: rviz_default_plugins/Pose
+      Color: 255; 220; 30
+      Enabled: true
+      Head Length: 0.65
+      Head Radius: 0.35
+      Name: Frame-Synchronous Pose
+      Shaft Length: 2.2
+      Shaft Radius: 0.18
+      Shape: Axes
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /dji/frame/pose
       Value: true
     - Alpha: 1
       Buffer Length: 1

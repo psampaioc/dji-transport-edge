@@ -124,11 +124,27 @@ class LatestState:
     def reject(self) -> None:
         with self._lock: self._transport["rejected_packets"] += 1
 
+    def associate_frame(self, feed: str, rtp_ssrc: int, rtp_ts: int) -> tuple[dict, dict] | None:
+        """Return AU identity plus frame-time navigation, or nothing when uncertain."""
+        with self._lock:
+            identity = self.correlation.identity_for_rtp(feed, rtp_ssrc, rtp_ts)
+            if identity is None:
+                return None
+            return ({
+                "session": identity.session, "feed": identity.feed, "frame_seq": identity.frame_seq,
+                "rtp_ssrc": identity.rtp_ssrc, "rtp_ts": identity.rtp_ts,
+                "android_first_byte_mono_ns": identity.android_first_byte_mono_ns,
+                "android_complete_mono_ns": identity.android_complete_mono_ns,
+                "dji_source_timestamp_ns": identity.dji_source_timestamp_ns,
+                "dji_timestamp_source": identity.dji_timestamp_source,
+            }, self.correlation.associate_android_time(identity.android_complete_mono_ns))
+
     def snapshot(self) -> dict:
         now = time.monotonic_ns()
         with self._lock:
             sources, frames, transport, session = deepcopy(self._sources), deepcopy(self._frames), deepcopy(self._transport), self._session
             history = {key: list(value) for key, value in self._history.items()}
+            correlation = self.correlation.snapshot()
         for record in list(sources.values()) + list(frames.values()): record["edge_receive_age_ns"] = now - record["edge_receive_mono_ns"]
         for frame in frames.values():
             associations = {}
@@ -138,4 +154,4 @@ class LatestState:
             frame["telemetry_associations"] = associations
         typed = lambda name: [value for value in sources.values() if value["type"] == name]
         flight, rtk, gimbal, health = typed("flight"), typed("rtk"), typed("gimbal"), typed("health")
-        return {"schema_version": 1, "session": session, "edge_mono_ns": now, "flight": flight[-1] if flight else None, "rtk": rtk[-1] if rtk else None, "gimbal": gimbal[-1] if gimbal else None, "health": health[-1] if health else None, "sources": sources, "video_frames": frames, "clock": self._clock_mapper.estimate(), "transport": transport, "correlation": self.correlation.snapshot()}
+        return {"schema_version": 1, "session": session, "edge_mono_ns": now, "flight": flight[-1] if flight else None, "rtk": rtk[-1] if rtk else None, "gimbal": gimbal[-1] if gimbal else None, "health": health[-1] if health else None, "sources": sources, "video_frames": frames, "clock": self._clock_mapper.estimate(), "transport": transport, "correlation": correlation}

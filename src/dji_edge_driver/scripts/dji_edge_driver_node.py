@@ -8,7 +8,7 @@ import time
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from dji_edge_driver.msg import NavigationState
+from dji_edge_driver.msg import FrameContext, NavigationState
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -18,10 +18,10 @@ from dji_edge_transport_core.clock import ClockMapper
 from dji_edge_transport_core.dashboard import DashboardServer
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
 from dji_edge_transport_core.navigation import build_navigation
-from dji_edge_transport_core.protocol import CLOCK_TYPES, FRAME_TYPES, ProtocolError, decode_json_packet
+from dji_edge_transport_core.protocol import CLOCK_TYPES, FRAME_TYPES, ProtocolError, decode_json_packet, parse_rtp_packet
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
 from dji_edge_transport_core.state import LatestState, SequenceTracker
-from dji_edge_transport_core.video import LatestFrameBuffer
+from dji_edge_transport_core.video import LatestFrameBuffer, RtpPtsBinding
 
 
 PARAMETERS = {
@@ -33,6 +33,7 @@ PARAMETERS = {
     "clock_ping_interval_s": 1.0, "dashboard_enabled": True,
     "dashboard_host": "127.0.0.1", "dashboard_port": 8090,
     "primary_topic": "/dji/primary/image_raw", "fpv_topic": "/dji/fpv/image_raw",
+    "primary_context_topic": "/dji/primary/frame_context", "fpv_context_topic": "/dji/fpv/frame_context",
     "navigation_topic": "/dji/navigation/state",
     "diagnostics_topic": "/dji/diagnostics",
     "transport_metrics_topic": "/dji/edge/transport_metrics",
@@ -76,20 +77,23 @@ class UdpEndpoint(threading.Thread):
 class VideoFeed:
     """Direct RTP/H.264 pipeline, ROS image publisher, and Edge metrics."""
 
-    def __init__(self, node, name, port, topic, capture_path):
+    def __init__(self, node, name, port, topic, context_topic, capture_path):
         self.node, self.name = node, name
         self.decoded_frames = self.published_frames = self.dropped_frames = 0
+        self.context_published = self.context_unavailable = 0
         self.width = self.height = 0
         self.error = None
         self.pipeline = self.gst = None
         self._stopping = threading.Event()
         self._latest_frame = LatestFrameBuffer()
+        self._pts_binding = RtpPtsBinding()
         self._sample_handler_id = None
         self._ros_consumer_active = False
         self.metrics = RtpMetrics(node.rtp_payload_type)
         self.capture = RawRtpCapture(capture_path)
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.publisher = node.create_publisher(Image, topic, qos)
+        self.context_publisher = node.create_publisher(FrameContext, context_topic, qos)
         try:
             import gi
             gi.require_version("Gst", "1.0")
@@ -101,6 +105,8 @@ class VideoFeed:
             self._sample_handler_id = self._sink.connect("new-sample", self._on_sample)
             source = self.pipeline.get_by_name(f"{name}_source")
             source.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, self._on_rtp)
+            jitter = self.pipeline.get_by_name(f"{name}_jitter")
+            jitter.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, self._on_jitter_rtp)
             self.pipeline.set_state(Gst.State.PLAYING)
         except Exception as error:
             self.error = str(error)
@@ -114,7 +120,7 @@ class VideoFeed:
         return (
             f"udpsrc name={self.name}_source address={self.node.bind_host} port={port} buffer-size=4194304 "
             "caps=application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,"
-            f"payload={self.node.rtp_payload_type} ! rtpjitterbuffer latency={self.node.rtp_latency_ms} "
+            f"payload={self.node.rtp_payload_type} ! rtpjitterbuffer name={self.name}_jitter latency={self.node.rtp_latency_ms} "
             "drop-on-latency=true do-lost=true ! rtph264depay wait-for-keyframe=true request-keyframe=true ! "
             f"h264parse config-interval=-1 ! avdec_h264 ! videoconvert ! video/x-raw,format=BGR ! tee name={self.name}_decoded "
             f"{self.name}_decoded. ! queue leaky=downstream max-size-buffers=1 ! "
@@ -136,7 +142,10 @@ class VideoFeed:
         mapped_ok, mapped = buffer.map(self.gst.MapFlags.READ)
         if mapped_ok:
             try:
-                frame = (width, height, bytes(mapped.data), time.monotonic_ns())
+                pts_ns = buffer.pts
+                if pts_ns == self.gst.CLOCK_TIME_NONE:
+                    pts_ns = None
+                frame = (width, height, bytes(mapped.data), time.monotonic_ns(), self._pts_binding.resolve(pts_ns))
                 if self._latest_frame.put(frame):
                     self.dropped_frames += 1
             finally:
@@ -150,7 +159,7 @@ class VideoFeed:
         frame = self._latest_frame.take()
         if frame is None or not rclpy.ok():
             return
-        width, height, data, _received_ns = frame
+        width, height, data, decoded_ns, rtp_identity = frame
         image = Image()
         image.header.stamp = self.node.get_clock().now().to_msg()
         image.header.frame_id = f"dji_{self.name}_camera"
@@ -158,6 +167,12 @@ class VideoFeed:
         image.data = data
         try:
             self.publisher.publish(image)
+            context = self.node.frame_context(self.name, rtp_identity, image.header, decoded_ns)
+            self.context_publisher.publish(context)
+            self.node.record_frame_context(context)
+            self.context_published += 1
+            if context.association_quality == FrameContext.ASSOCIATION_UNAVAILABLE:
+                self.context_unavailable += 1
             self.published_frames += 1
         except RuntimeError:
             if not self._stopping.is_set():
@@ -175,6 +190,18 @@ class VideoFeed:
             data = buffer.extract_dup(0, buffer.get_size())
             if self.metrics.observe(data) is not None:
                 self.capture.write(data)
+        return self.gst.PadProbeReturn.OK
+
+    def _on_jitter_rtp(self, _pad, info):
+        buffer = info.get_buffer()
+        if buffer is None:
+            return self.gst.PadProbeReturn.OK
+        try:
+            packet = parse_rtp_packet(buffer.extract_dup(0, buffer.get_size()), self.node.rtp_payload_type)
+            pts_ns = None if buffer.pts == self.gst.CLOCK_TIME_NONE else int(buffer.pts)
+            self._pts_binding.observe(pts_ns, packet.ssrc, packet.timestamp)
+        except ProtocolError:
+            pass
         return self.gst.PadProbeReturn.OK
 
     def close(self):
@@ -237,8 +264,8 @@ class EdgeBridge(Node):
             return []
         capture = self.parameter("capture_rtp")
         return [
-            VideoFeed(self, "primary", self.parameter("primary_rtp_port"), self.parameter("primary_topic"), str(self.evidence.root / "primary.rtpbin") if capture else None),
-            VideoFeed(self, "fpv", self.parameter("fpv_rtp_port"), self.parameter("fpv_topic"), str(self.evidence.root / "fpv.rtpbin") if capture else None),
+            VideoFeed(self, "primary", self.parameter("primary_rtp_port"), self.parameter("primary_topic"), self.parameter("primary_context_topic"), str(self.evidence.root / "primary.rtpbin") if capture else None),
+            VideoFeed(self, "fpv", self.parameter("fpv_rtp_port"), self.parameter("fpv_topic"), self.parameter("fpv_context_topic"), str(self.evidence.root / "fpv.rtpbin") if capture else None),
         ]
 
     def _create_dashboard(self):
@@ -327,6 +354,60 @@ class EdgeBridge(Node):
         message.transport_age_s = float("nan") if navigation["transport_age_s"] is None else navigation["transport_age_s"]
         self.navigation_publisher.publish(message)
 
+    def frame_context(self, feed, rtp_identity, header, decoded_ns):
+        message = FrameContext()
+        message.header = header
+        message.feed = feed
+        message.edge_decoded_mono_ns = decoded_ns
+        identity_and_navigation = None if rtp_identity is None else self.latest_state.associate_frame(feed, *rtp_identity)
+        if identity_and_navigation is None:
+            message.association_quality = FrameContext.ASSOCIATION_UNAVAILABLE
+            message.association_reason = "missing or ambiguous RTP/AU association"
+            return message
+        identity, navigation = identity_and_navigation
+        message.session, message.frame_seq = identity["session"], identity["frame_seq"]
+        message.rtp_ssrc, message.rtp_ts = identity["rtp_ssrc"], identity["rtp_ts"]
+        message.android_au_first_byte_mono_ns = identity["android_first_byte_mono_ns"]
+        message.android_au_complete_rx_mono_ns = identity["android_complete_mono_ns"]
+        message.has_dji_source_timestamp = identity["dji_source_timestamp_ns"] is not None
+        message.dji_source_timestamp_ns = identity["dji_source_timestamp_ns"] or 0
+        message.dji_timestamp_source = identity["dji_timestamp_source"] or ""
+        message.association_quality = {
+            "interpolated": FrameContext.ASSOCIATION_INTERPOLATED,
+            "nearest": FrameContext.ASSOCIATION_NEAREST,
+        }.get(navigation["association_quality"], FrameContext.ASSOCIATION_UNAVAILABLE)
+        message.association_reason = navigation["association_reason"]
+        message.navigation_time_offset_ns = navigation["navigation_time_offset_ns"]
+        message.position_valid = navigation["position_valid"]
+        message.position_source = {
+            "rtk": FrameContext.POSITION_RTK,
+            "gps_fallback": FrameContext.POSITION_GPS_FALLBACK,
+        }.get(navigation["position_source"], FrameContext.POSITION_UNKNOWN)
+        message.rtk_valid = navigation["rtk_valid"]
+        message.latitude_deg, message.longitude_deg, message.altitude_m, message.heading_deg = (navigation[key] for key in ("latitude_deg", "longitude_deg", "altitude_m", "heading_deg"))
+        message.gimbal_pitch_valid, message.gimbal_pitch_deg = navigation["gimbal_pitch_valid"], navigation["gimbal_pitch_deg"]
+        message.flight_android_mono_ns, message.rtk_android_mono_ns, message.gimbal_android_mono_ns = (navigation[key] for key in ("flight_android_mono_ns", "rtk_android_mono_ns", "gimbal_android_mono_ns"))
+        return message
+
+    def record_frame_context(self, message):
+        self.evidence.write("frame_context", {
+            "session": message.session, "feed": message.feed, "frame_seq": message.frame_seq,
+            "rtp_ssrc": message.rtp_ssrc, "rtp_ts": message.rtp_ts,
+            "source_time": {
+                "android_au_first_byte_mono_ns": message.android_au_first_byte_mono_ns,
+                "android_au_complete_rx_mono_ns": message.android_au_complete_rx_mono_ns,
+                "dji_source_timestamp_ns": message.dji_source_timestamp_ns if message.has_dji_source_timestamp else None,
+                "dji_timestamp_source": message.dji_timestamp_source if message.has_dji_source_timestamp else None,
+            },
+            "association": {
+                "quality": int(message.association_quality), "reason": message.association_reason,
+                "navigation_time_offset_ns": message.navigation_time_offset_ns,
+                "position_valid": message.position_valid, "position_source": int(message.position_source),
+                "rtk_valid": message.rtk_valid, "gimbal_pitch_valid": message.gimbal_pitch_valid,
+            },
+            "edge_observation": {"decoded_mono_ns": message.edge_decoded_mono_ns},
+        })
+
     def publish_latest_frames(self):
         for video in self.videos:
             video.publish_latest()
@@ -343,7 +424,8 @@ class EdgeBridge(Node):
             status.values.append(KeyValue(key=f"udp.{port}.error", value=error))
         for video in self.videos:
             metrics = video.metrics.snapshot()
-            status.values.extend([KeyValue(key=f"{video.name}.decoded_frames", value=str(video.decoded_frames)), KeyValue(key=f"{video.name}.published_frames", value=str(video.published_frames)), KeyValue(key=f"{video.name}.dropped_old_frames", value=str(video.dropped_frames)), KeyValue(key=f"{video.name}.resolution", value=f"{video.width}x{video.height}"), KeyValue(key=f"{video.name}.error", value=video.error or ""), KeyValue(key=f"{video.name}.rtp_packets", value=str(metrics["packets_received"])), KeyValue(key=f"{video.name}.rtp_gaps", value=str(metrics["sequence_gaps"])), KeyValue(key=f"{video.name}.fps", value=str(metrics["estimated_fps"]))])
+            binding = video._pts_binding.snapshot()
+            status.values.extend([KeyValue(key=f"{video.name}.decoded_frames", value=str(video.decoded_frames)), KeyValue(key=f"{video.name}.published_frames", value=str(video.published_frames)), KeyValue(key=f"{video.name}.dropped_old_frames", value=str(video.dropped_frames)), KeyValue(key=f"{video.name}.context_published", value=str(video.context_published)), KeyValue(key=f"{video.name}.context_unavailable", value=str(video.context_unavailable)), KeyValue(key=f"{video.name}.pts_binding_missing", value=str(binding["missing"])), KeyValue(key=f"{video.name}.resolution", value=f"{video.width}x{video.height}"), KeyValue(key=f"{video.name}.error", value=video.error or ""), KeyValue(key=f"{video.name}.rtp_packets", value=str(metrics["packets_received"])), KeyValue(key=f"{video.name}.rtp_gaps", value=str(metrics["sequence_gaps"])), KeyValue(key=f"{video.name}.fps", value=str(metrics["estimated_fps"]))])
         diagnostics = DiagnosticArray()
         diagnostics.header.stamp = self.get_clock().now().to_msg()
         diagnostics.status = [status]
@@ -352,7 +434,7 @@ class EdgeBridge(Node):
 
     def dashboard_state(self):
         evidence = self.evidence.health()
-        videos = [{"name": video.name, "decoded_frames": video.decoded_frames, "published_frames": video.published_frames, "dropped_old_frames": video.dropped_frames, "resolution": {"width": video.width, "height": video.height}, "error": video.error, "rtp": video.metrics.snapshot(), "capture_rtp": video.capture.enabled} for video in self.videos]
+        videos = [{"name": video.name, "decoded_frames": video.decoded_frames, "published_frames": video.published_frames, "dropped_old_frames": video.dropped_frames, "context": {"published": video.context_published, "unavailable": video.context_unavailable, "pts_binding": video._pts_binding.snapshot()}, "resolution": {"width": video.width, "height": video.height}, "error": video.error, "rtp": video.metrics.snapshot(), "capture_rtp": video.capture.enabled} for video in self.videos]
         state = self.latest_state.snapshot()
         return {
             "schema_version": 1,
