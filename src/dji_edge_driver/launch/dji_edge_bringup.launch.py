@@ -12,9 +12,11 @@ def generate_launch_description():
     mapper_share = Path(get_package_share_directory("dji_edge_mapper"))
     driver_config = LaunchConfiguration("driver_config_file")
     mapper_config = LaunchConfiguration("mapper_config_file")
+    local_mapper_config = mapper_share / "config" / "mapper.local.yaml"
+    default_mapper_config = local_mapper_config if local_mapper_config.exists() else mapper_share / "config" / "mapper.yaml"
     return LaunchDescription([
         DeclareLaunchArgument("driver_config_file", default_value=str(driver_share / "config" / "bridge.yaml")),
-        DeclareLaunchArgument("mapper_config_file", default_value=str(mapper_share / "config" / "mapper.yaml")),
+        DeclareLaunchArgument("mapper_config_file", default_value=str(default_mapper_config)),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(driver_share / "launch" / "dji_edge_driver.launch.py")),
             launch_arguments={"config_file": driver_config}.items(),

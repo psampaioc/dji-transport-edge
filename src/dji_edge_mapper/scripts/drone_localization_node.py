@@ -40,6 +40,7 @@ class DroneLocalizationNode(Node):
     def __init__(self):
         super().__init__("drone_localization_node")
         for name, default in {
+            "enabled": False,
             "navigation_topic": "/dji/navigation/state",
             "pose_topic": "/dji/navigation/pose",
             "path_topic": "/dji/navigation/path",
@@ -61,6 +62,9 @@ class DroneLocalizationNode(Node):
             self.declare_parameter(name, default)
 
         p = lambda name: self.get_parameter(name).value
+        if not bool(p("enabled")):
+            self.get_logger().warning("Localization disabled: create config/mapper.local.yaml and provide a site map.")
+            return
         self.frame_id, self.child_frame = p("frame_id"), p("child_frame")
         self.map_margin_m = float(p("map_margin_m"))
         self.bounds_check, self.jump_gate = bool(p("enable_map_bounds_check")), bool(p("enable_jump_gate"))
@@ -197,9 +201,15 @@ def main():
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

@@ -118,5 +118,5 @@ class LatestState:
                 associations[source] = {"sequence": None if prior is None else prior["sequence"], "age_ns": None if prior is None else frame["android_mono_ns"] - prior["android_mono_ns"], "causal": prior is not None, "method": "latest_previous" if prior else "no_previous_sample"}
             frame["telemetry_associations"] = associations
         typed = lambda name: [value for value in sources.values() if value["type"] == name]
-        flight, rtk, health = typed("flight"), typed("rtk"), typed("health")
-        return {"schema_version": 1, "session": session, "edge_mono_ns": now, "flight": flight[-1] if flight else None, "rtk": rtk[-1] if rtk else None, "gimbals": typed("gimbal"), "health": health[-1] if health else None, "sources": sources, "video_frames": frames, "clock": self._clock_mapper.estimate(), "transport": transport}
+        flight, rtk, gimbal, health = typed("flight"), typed("rtk"), typed("gimbal"), typed("health")
+        return {"schema_version": 1, "session": session, "edge_mono_ns": now, "flight": flight[-1] if flight else None, "rtk": rtk[-1] if rtk else None, "gimbal": gimbal[-1] if gimbal else None, "health": health[-1] if health else None, "sources": sources, "video_frames": frames, "clock": self._clock_mapper.estimate(), "transport": transport}

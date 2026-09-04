@@ -1,12 +1,53 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
+# ROS 2 and Python build artifacts
 build/
 install/
 log/
 dist/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local environments, test output, and captured transport evidence
 .venv/
-config.toml
-evidence/
 .runtime/
+evidence/
+*.ndjson
+*.rtpbin
+*.pcap
+*.pcapng
+*.bag
+rosbag2_*/
+
+# Machine-specific runtime configuration and credentials
+config.toml
+*.local.toml
+*.local.yaml
+*.local.yml
+*.local.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Private site map and its geographic calibration
+src/dji_edge_mapper/config/map_vis.pcd
+src/dji_edge_mapper/config/map_metadata.json
+
+# AI-agent and local-tool state
+AGENTS.md
+.Codex/
+.codex/
+.memsearch/
 graphify-out/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

@@ -19,8 +19,10 @@ def build_navigation(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     """Return RTK-preferred navigation, with continuous GPS fallback."""
     flight = snapshot.get("flight") or {}
     rtk = snapshot.get("rtk") or {}
+    gimbal = snapshot.get("gimbal") or {}
     flight_fields = flight.get("data", {}).get("fields", {})
     rtk_fields = rtk.get("data", {}).get("fields", {})
+    gimbal_fields = gimbal.get("data", {}).get("fields", {})
 
     rtk_latitude = _unwrap(rtk_fields, "fusion.latitude_deg")
     rtk_longitude = _unwrap(rtk_fields, "fusion.longitude_deg")
@@ -42,13 +44,12 @@ def build_navigation(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         "longitude_deg": float(longitude),
         "altitude_m": float(_unwrap(flight_fields, "aircraft.altitude_m", 0.0) or 0.0),
         "heading_deg": float(_unwrap(flight_fields, "heading_deg", 0.0) or 0.0),
-        "velocity_north_m_s": float(_unwrap(flight_fields, "velocity.north_m_s", 0.0) or 0.0),
-        "velocity_east_m_s": float(_unwrap(flight_fields, "velocity.east_m_s", 0.0) or 0.0),
-        "velocity_down_m_s": float(_unwrap(flight_fields, "velocity.down_m_s", 0.0) or 0.0),
         "position_source": source,
         "position_valid": True,
         "rtk_valid": rtk_valid,
-        "gps_signal_level": int(_unwrap(flight_fields, "gps.signal_level", 0) or 0),
+        "gimbal_pitch_valid": _finite(_unwrap(gimbal_fields, "attitude.pitch_deg")),
+        "gimbal_pitch_deg": float(_unwrap(gimbal_fields, "attitude.pitch_deg", 0.0) or 0.0),
+        "gimbal_android_mono_ns": int(gimbal.get("android_mono_ns", 0) or 0),
         "session": snapshot.get("session") or timing.get("session", ""),
         "android_mono_ns": int(timing.get("android_mono_ns", 0) or 0),
         "edge_receive_mono_ns": int(received or 0),

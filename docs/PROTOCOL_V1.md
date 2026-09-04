@@ -1,8 +1,8 @@
 # Matrice transport protocol v1
 
-## Canonical telemetry form
+## Minimal telemetry form
 
-The canonical Android wire form is fragmented `data.fields`, not compact top-level telemetry. Compact packets remain accepted only for compatibility and protocol tests.
+The canonical Android wire form is one compact `data.fields` datagram per callback. The Edge accepts old fragmented packets during migration, but Android must not fragment these minimal samples.
 
 Each datagram contains:
 
@@ -17,8 +17,6 @@ Each datagram contains:
   "data": {
     "sample_sequence": 8,
     "component_index": 0,
-    "chunk_index": 0,
-    "chunk_count": 2,
     "fields": {
       "aircraft.latitude_deg": {
         "value": 38.0,
@@ -35,15 +33,22 @@ Rules:
 
 - maximum datagram size defaults to 1200 bytes;
 - `seq` is monotonic per `(session,type,stream)` datagram;
-- `sample_sequence` identifies one native DJI callback across all its chunks;
-- a sample is published only after every chunk arrives;
+- `sample_sequence` identifies one native DJI callback;
 - field names carry units as suffixes, such as `_deg`, `_m`, `_m_s` and `_ns`;
 - every field carries explicit validity and source/component identity;
 - `rx_mono_ns` is Android `elapsedRealtimeNanos()` callback arrival time.
 
+Only these telemetry fields belong in the transport contract:
+
+- `flight`: `aircraft.latitude_deg`, `aircraft.longitude_deg`, `aircraft.altitude_m`, `heading_deg`;
+- `rtk`: `fusion.latitude_deg`, `fusion.longitude_deg`, `is_being_used`;
+- `gimbal`: `attitude.pitch_deg`.
+
+`health` and `video_au` stay compact diagnostic packets. Battery, parser dumps, raw video bytes, and unrelated DJI telemetry do not belong in normal transport packets.
+
 ## Canonical video feeds
 
-Only `primary` and `secondary` are valid configured feed names. Physical DJI sources such as `FPV_CAM`, `LEFT_CAM` and `RIGHT_CAM` remain metadata and must not be confused with the logical feed.
+Only `primary` and `fpv` are valid configured feed names. Physical DJI sources such as `FPV_CAM`, `LEFT_CAM` and `RIGHT_CAM` remain metadata and must not be confused with the logical feed.
 
 RTP is RFC 3550/RFC 6184 H.264, payload type 96 by default, 90 kHz clock, one SSRC and sequence space per logical feed.
 

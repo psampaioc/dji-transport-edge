@@ -7,6 +7,17 @@ from pathlib import Path
 from queue import Full, Queue
 from threading import Lock, Thread
 from typing import Any
+from uuid import uuid4
+
+
+def create_session_directory(root: str | Path) -> Path:
+    """Create one attributable evidence directory for a driver process."""
+    import datetime
+
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = Path(root) / f"edge-{stamp}-{uuid4().hex[:8]}"
+    path.mkdir(parents=True, exist_ok=False)
+    return path
 
 
 class EvidenceWriter:
@@ -72,4 +83,3 @@ class EvidenceWriter:
             self._closed = True
         self._queue.put(None)
         self._worker.join(timeout=5)
-

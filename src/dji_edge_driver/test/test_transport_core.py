@@ -6,11 +6,12 @@ import pytest
 
 from dji_edge_transport_core.clock import ClockMapper
 from dji_edge_transport_core.dashboard import DashboardServer
-from dji_edge_transport_core.evidence import EvidenceWriter
+from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
 from dji_edge_transport_core.state import LatestState, SequenceTracker
+from dji_edge_transport_core.video import LatestFrameBuffer
 
 
 def test_golden_control_packets_decode_with_stable_envelopes():
@@ -64,6 +65,26 @@ def test_evidence_writer_drains_ndjson_and_reports_write_health(tmp_path):
     assert writer.health()["queue_depth"] == 0
     assert writer.health()["writer_alive"] is False
     assert writer.health()["write_errors"] == 0
+
+
+def test_evidence_sessions_are_distinct_and_stay_under_configured_root(tmp_path):
+    first = create_session_directory(tmp_path)
+    second = create_session_directory(tmp_path)
+    assert first.parent == tmp_path
+    assert second.parent == tmp_path
+    assert first != second
+    assert first.name.startswith("edge-")
+
+
+def test_latest_frame_buffer_replaces_stale_frames_without_queueing():
+    frames = LatestFrameBuffer()
+    assert frames.put("first") is False
+    assert frames.put("newest") is True
+    assert frames.take() == "newest"
+    assert frames.take() is None
+    frames.put("discard")
+    frames.clear()
+    assert frames.take() is None
 
 
 def test_rtp_metrics_classifies_wrap_gap_duplicate_and_access_units():
@@ -140,12 +161,19 @@ def test_navigation_prefers_active_rtk_but_keeps_aircraft_relative_altitude():
             "mapped_edge_mono_ns": 155,
             "data": {"fields": {"fusion.latitude_deg": {"value": 38.1}, "fusion.longitude_deg": {"value": -9.1}, "is_being_used": {"value": True}}},
         },
+        "gimbal": {
+            "android_mono_ns": 115,
+            "data": {"fields": {"attitude.pitch_deg": {"value": -42.5}}},
+        },
     }
     navigation = build_navigation(snapshot)
     assert navigation["position_source"] == "rtk"
     assert navigation["latitude_deg"] == 38.1
     assert navigation["altitude_m"] == 12.5
     assert navigation["transport_age_s"] == pytest.approx(5e-9)
+    assert navigation["gimbal_pitch_valid"] is True
+    assert navigation["gimbal_pitch_deg"] == -42.5
+    assert navigation["gimbal_android_mono_ns"] == 115
 
 
 def test_navigation_falls_back_to_gps_and_rejects_missing_position():
@@ -153,6 +181,7 @@ def test_navigation_falls_back_to_gps_and_rejects_missing_position():
     navigation = build_navigation(gps_snapshot)
     assert navigation["position_source"] == "gps_fallback"
     assert navigation["rtk_valid"] is False
+    assert navigation["gimbal_pitch_valid"] is False
     assert navigation["transport_age_s"] is None
     assert build_navigation({"flight": None, "rtk": None}) is None
 
@@ -167,6 +196,7 @@ def test_dashboard_serves_state_health_and_clean_exit_callback():
         assert json.loads(urlopen(f"{base}/health", timeout=2).read())["status"] == "ok"
         page = urlopen(f"{base}/", timeout=2).read().decode()
         assert "DJI Transport Edge" in page
+        assert "Configuration and raw diagnostics" in page
         request = Request(f"{base}/v1/exit", method="POST")
         assert json.loads(urlopen(request, timeout=2).read()) == {"stopping": True}
         assert exits == [True]

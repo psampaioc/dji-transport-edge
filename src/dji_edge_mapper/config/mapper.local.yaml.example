@@ -1,8 +1,8 @@
+# Copy to mapper.local.yaml, then set your own map files and calibration.
+# This file is intentionally generic and must not be used for navigation as-is.
 /map_publisher:
   ros__parameters:
-    # Public checkout: disabled until the operator creates mapper.local.yaml
-    # plus their own map_vis.pcd and map_metadata.json.
-    enabled: false
+    enabled: true
     pcd_file_path: "config/map_vis.pcd"
     map_frame: "map"
     topic_name: "/map/cloud"
@@ -10,14 +10,13 @@
 
 /drone_localization_node:
   ros__parameters:
+    enabled: true
     navigation_topic: "/dji/navigation/state"
     pose_topic: "/dji/navigation/pose"
     path_topic: "/dji/navigation/path"
     status_topic: "/dji/navigation/status"
     frame_id: "map"
     child_frame: "dji_aircraft"
-    enabled: false
-    # Placeholder only; set the real site projection in mapper.local.yaml.
     utm_zone: 1
     utm_south: false
     map_metadata_path: "config/map_metadata.json"

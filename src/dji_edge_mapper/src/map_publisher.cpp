@@ -8,6 +8,7 @@ namespace dji_edge_mapper
 MapPublisher::MapPublisher(const rclcpp::NodeOptions& options) : Node("map_publisher", options)
 {
   // Declare parameters
+  this->declare_parameter<bool>("enabled", false);
   this->declare_parameter<std::string>("pcd_file_path", "config/map_vis.pcd");
   this->declare_parameter<std::string>("map_frame", "map");
   this->declare_parameter<std::string>("topic_name", "/map/cloud");
@@ -18,6 +19,11 @@ MapPublisher::MapPublisher(const rclcpp::NodeOptions& options) : Node("map_publi
   map_frame_ = this->get_parameter("map_frame").as_string();
   topic_name_ = this->get_parameter("topic_name").as_string();
   publish_once_ = this->get_parameter("publish_once").as_bool();
+
+  if (!this->get_parameter("enabled").as_bool()) {
+    RCLCPP_WARN(this->get_logger(), "Map publisher disabled: create config/mapper.local.yaml and provide a site map.");
+    return;
+  }
 
   // Resolve package-relative path
   if (!pcd_file_path_.empty() && pcd_file_path_[0] != '/') {
