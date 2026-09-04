@@ -55,7 +55,15 @@ source install/setup.bash
 ros2 launch dji_edge_driver dji_edge_bringup.launch.py
 ```
 
-The launch starts the driver, mapper, dashboard and both native GStreamer previews. The terminal remains attached to the pipeline. `djiedge-run` is an optional host convenience command with the same build/source/launch sequence.
+The launch starts the driver, mapper, dashboard, both native GStreamer previews, and the preconfigured RViz view. RViz shows the Primary ROS image, the map, cyan continuous path, and yellow frame-synchronous pose. The terminal remains attached to the pipeline. `djiedge-run` is an optional host convenience command with the same build/source/launch sequence.
+
+For headless Docker checks or a machine without X11, keep the exact same transport/map bringup and disable only RViz:
+
+```bash
+ros2 launch dji_edge_driver dji_edge_bringup.launch.py rviz:=false preview_windows:=false
+```
+
+Without an ignored local map configuration, RViz still opens and the driver/dashboard/video work, but the map/localization topics are intentionally disabled.
 
 Open the dashboard at [http://127.0.0.1:8090](http://127.0.0.1:8090). Its **Exit** button stops the driver and the ROS launch then closes the mapper and container. `Ctrl-C` in the `djiedge` terminal has the same intent.
 
@@ -80,10 +88,10 @@ It reports post-network Edge evidence: accepted/rejected JSON packets, clock sta
 
 The driver publishes the following direct-ingress topics:
 
-- Images: `/dji/primary/image_raw`, `/dji/fpv/image_raw` (`sensor_msgs/Image`, best-effort, depth 1).
+- Images: `/dji/primary/image_raw`, `/dji/fpv/image_raw` (`sensor_msgs/Image`, best-effort, depth 1), each with its matching `FrameContext` on `/dji/primary/frame_context` and `/dji/fpv/frame_context`.
 - Navigation and health: `/dji/navigation/state` (`dji_edge_driver/NavigationState`), `/dji/diagnostics`, and `/dji/edge/transport_metrics` (`diagnostic_msgs/DiagnosticArray`). Raw Android packets remain evidence/dashboard diagnostics rather than ROS topics.
 
-The mapper consumes `/dji/navigation/state` and publishes `/map/cloud`, `/dji/navigation/pose`, `/dji/navigation/path`, `/dji/navigation/status`, and `/tf`.
+The mapper consumes navigation plus Primary frame context and publishes `/map/cloud`, the continuous `/dji/navigation/pose` and `/dji/navigation/path`, the frame-synchronous `/dji/frame/pose`, `/dji/navigation/status`, and `/tf`.
 
 ## Configuration
 
@@ -94,19 +102,23 @@ The committed defaults are in [bridge.yaml](src/dji_edge_driver/config/bridge.ya
 - `preview_windows: true` starts Primary and FPV GStreamer windows.
 - `capture_rtp: false` is the normal setting. NDJSON evidence is always on.
 
-To keep local configuration out of Git, copy the file and pass it to launch from a shell:
+The dashboard writes only `android_clock_host`, `capture_rtp`, and `preview_windows` to the ignored `/workspace/bridge.local.yaml`. It shows the local Ubuntu IPv4 addresses to copy into the tablet and never exposes ports, paths, shell commands, or flight controls. **Save** persists for the next launch; **Save and restart** persists then restarts the managed Edge stack once.
+
+You can also create the same local configuration manually:
 
 ```bash
 cp src/dji_edge_driver/config/bridge.yaml bridge.local.yaml
 ```
 
-Then use the Humble shell and pass `driver_config_file:=/workspace/bridge.local.yaml` to the launch command. The normal `djiedge` path currently uses the committed configuration directly.
+The normal package launcher automatically prefers this ignored file when it exists. Delete it to return to committed defaults.
+
+`djiedge-run` uses this managed launcher, so dashboard **Save and restart** returns to the same command session after one clean shutdown. If launching manually inside `djiedge`, use `ros2 run dji_edge_driver dji_edge_bringup` rather than invoking `ros2 launch` directly.
 
 ## Evidence and recording
 
 `evidence/edge-<UTC>-<id>/` is created beside the workspace for every driver run.
 
-- NDJSON is always on: telemetry, frame metadata, clock exchanges and protocol errors are written asynchronously and do not block UDP ingress.
+- NDJSON is always on: telemetry, frame metadata, frame-context associations, clock exchanges and protocol errors are written asynchronously and do not block UDP ingress. Android source times and Edge decode observations are separate fields.
 - Raw RTP is opt-in: set `capture_rtp: true` only for a short props-off diagnostic session. It creates `primary.rtpbin` and `fpv.rtpbin` inside that same session, with `DJIRTP01` magic and a 4-byte big-endian length before each RTP datagram. It is packet evidence, not a video file or a rosbag.
 - Use `rosbag2` separately when you need to replay ROS topics as a complete ROS session. It records published ROS messages, whereas raw RTP capture preserves the original post-network encoded datagrams for transport/H.264 investigation.
 
@@ -117,6 +129,8 @@ The Dockerized full bringup has been smoke-tested without the tablet: it builds 
 A synthetic H.264/RTP Primary source was also received directly on UDP `5600`, decoded at `1280x720` and approximately `30 FPS`, and published as ROS images. Its old-frame counter increased under the synthetic producer, which proves the ROS handoff replaces stale frames instead of accumulating a queue.
 
 This does not replace a props-off tablet/drone bench: that bench must verify actual Android ingress, Primary quality/latency, the first failing FPV boundary, GPS/RTK selection, and gimbal pitch.
+
+The source-time association code has deterministic unit coverage. Its fully synthetic H.264/RTP GStreamer characterization is skipped in the current Humble image because it intentionally has no `x264enc` fixture encoder; the actual props-off bench remains the required proof that Android RTP timestamps map to decoded frames for both feeds.
 
 ## Props-off hardware bench
 
@@ -129,3 +143,17 @@ python3 /workspace/src/dji_edge_driver/scripts/capture_transport_bench.py \
 ```
 
 The script only reads the local dashboard. The resulting JSON preserves each dashboard sample, including the exact evidence session path, pre-network Android health, post-network RTP/AU metrics, image publish/drop counters, clock state, navigation source, and both feeds. It does not capture raw RTP or issue any DJI command.
+
+## Final integrated props-off acceptance
+
+Run this once after the tablet is connected to the Cendence/drone with props off.
+
+1. In a fresh terminal, run `source ~/.zshrc` then `djiedge-run`. It builds, opens the two native GStreamer previews and RViz, and serves the dashboard at `http://127.0.0.1:8090`.
+2. In the dashboard, verify the shown Ubuntu IPv4 address; use that address in the tablet transport screen. Confirm `capture_rtp` is off unless this is a short packet-diagnostic capture.
+3. Enable Android transport. On dashboard/RViz verify Primary RTP bytes, decoded frames, ROS frames and Primary image growth. RViz must show the cyan navigation path and yellow `/dji/frame/pose` marker separately. A context counter marked unavailable is honest evidence of an AU/telemetry association failure, not a position estimate.
+4. Select FPV in the tablet. Verify the native FPV window, `/dji/fpv/image_raw`, FPV RTP/AU counters and FPV frame-context counters independently. If Android callbacks grow while Edge FPV RTP stays zero, record that as Android emission failure; do not call it an Edge decode pass.
+5. Observe navigation source. RTK is preferred when `is_being_used` is valid; otherwise the path must continue as GPS fallback with aircraft-relative altitude. Verify gimbal pitch validity in `FrameContext`/evidence.
+6. Change only a safe dashboard value, use **Save and restart**, and wait for the dashboard/RViz to return once. Confirm the selected value persists and the process list contains one driver/mapper/RViz stack. Use **Exit** afterward and confirm it does not restart.
+7. Run the 60-second bench command above. Retain its JSON and the dashboard evidence-session directory. Attach them to issues #1–#3 together with a note saying whether Primary, FPV, RTK, clock and frame contexts were actually observed.
+
+This acceptance path never issues a DJI flight, mission, gimbal, arm, takeoff, or landing command.
