@@ -7,11 +7,13 @@ import pytest
 from dji_edge_transport_core.clock import ClockMapper
 from dji_edge_transport_core.dashboard import DashboardServer
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
+from dji_edge_transport_core.local_config import atomic_write, validate
 from dji_edge_transport_core.navigation import build_navigation
-from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet
+from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet, video_au_identity
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
 from dji_edge_transport_core.state import LatestState, SequenceTracker
-from dji_edge_transport_core.video import LatestFrameBuffer
+from dji_edge_transport_core.synchronization import TemporalCorrelation
+from dji_edge_transport_core.video import LatestFrameBuffer, RtpPtsBinding
 
 
 def test_golden_control_packets_decode_with_stable_envelopes():
@@ -29,6 +31,30 @@ def test_golden_control_packets_decode_with_stable_envelopes():
     assert [packet.packet_type for packet in decoded] == ["flight", "rtk", "gimbal", "battery", "health", "video_au"]
     assert decoded[-1].stream == "primary"
     assert decoded[-1].body["rtp_ssrc"] == 305419896
+
+
+def test_video_au_identity_keeps_android_time_and_optional_dji_time_separate():
+    packet = decode_json_packet(json.dumps({
+        "v": 1, "type": "video_au", "session": "s", "feed": "primary", "frame_seq": 9,
+        "rtp_ssrc": 12, "rtp_ts": 34, "au_first_byte_rx_mono_ns": 100,
+        "au_complete_rx_mono_ns": 125, "dji_source_timestamp_ns": 77,
+        "dji_timestamp_source": "dji_callback_documented_clock",
+    }).encode(), 1)
+    identity = video_au_identity(packet)
+    assert identity.android_first_byte_mono_ns == 100
+    assert identity.android_complete_mono_ns == 125
+    assert identity.dji_source_timestamp_ns == 77
+    assert identity.dji_timestamp_source == "dji_callback_documented_clock"
+
+
+@pytest.mark.parametrize("packet", [
+    {"v": 1, "type": "video_au", "session": "s", "feed": "other", "frame_seq": 1, "rtp_ssrc": 1, "rtp_ts": 2, "au_first_byte_rx_mono_ns": 3},
+    {"v": 1, "type": "video_au", "session": "s", "feed": "primary", "frame_seq": 1, "rtp_ssrc": 1, "rtp_ts": 2, "au_first_byte_rx_mono_ns": 3, "dji_timestamp_source": "orphan"},
+])
+def test_video_au_identity_rejects_invalid_contract(packet):
+    with pytest.raises(ProtocolError):
+        decoded = decode_json_packet(json.dumps(packet).encode(), 1)
+        video_au_identity(decoded)
 
 
 def test_complete_fragment_replaces_no_partial_state_and_duplicate_is_ignored():
@@ -85,6 +111,17 @@ def test_latest_frame_buffer_replaces_stale_frames_without_queueing():
     frames.put("discard")
     frames.clear()
     assert frames.take() is None
+
+
+def test_rtp_pts_binding_fails_closed_for_missing_or_ambiguous_pipeline_time():
+    binding = RtpPtsBinding(max_entries=2)
+    assert binding.observe(101, 7, 11) is True
+    assert binding.resolve(101) == (7, 11)
+    assert binding.resolve(999) is None
+    assert binding.observe(102, 7, 12) is True
+    assert binding.observe(102, 7, 13) is False
+    assert binding.resolve(102) is None
+    assert binding.snapshot()["ambiguous"] == 1
 
 
 def test_rtp_metrics_classifies_wrap_gap_duplicate_and_access_units():
@@ -186,6 +223,80 @@ def test_navigation_falls_back_to_gps_and_rejects_missing_position():
     assert build_navigation({"flight": None, "rtk": None}) is None
 
 
+def test_temporal_correlation_interpolates_frame_navigation_and_heading_wrap():
+    correlation = TemporalCorrelation(max_samples=8, max_gap_ns=1_000)
+    correlation.start_session("s")
+    correlation.add_telemetry("flight", {"android_mono_ns": 100, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.0}, "aircraft.longitude_deg": {"value": -9.0},
+        "aircraft.altitude_m": {"value": 10.0}, "heading_deg": {"value": 350.0},
+    }}})
+    correlation.add_telemetry("flight", {"android_mono_ns": 300, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.2}, "aircraft.longitude_deg": {"value": -8.8},
+        "aircraft.altitude_m": {"value": 14.0}, "heading_deg": {"value": 10.0},
+    }}})
+    correlation.add_telemetry("gimbal", {"android_mono_ns": 100, "data": {"fields": {"attitude.pitch_deg": {"value": -40.0}}}})
+    correlation.add_telemetry("gimbal", {"android_mono_ns": 300, "data": {"fields": {"attitude.pitch_deg": {"value": -20.0}}}})
+    context = correlation.associate_android_time(200)
+    assert context["association_quality"] == "interpolated"
+    assert context["position_source"] == "gps_fallback"
+    assert context["latitude_deg"] == pytest.approx(38.1)
+    assert context["altitude_m"] == pytest.approx(12.0)
+    assert context["heading_deg"] == pytest.approx(0.0)
+    assert context["gimbal_pitch_deg"] == pytest.approx(-30.0)
+
+
+def test_temporal_correlation_prefers_relevant_rtk_and_fails_closed_when_stale():
+    correlation = TemporalCorrelation(max_samples=4, max_gap_ns=100)
+    correlation.start_session("s")
+    correlation.add_telemetry("flight", {"android_mono_ns": 100, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.0}, "aircraft.longitude_deg": {"value": -9.0},
+        "aircraft.altitude_m": {"value": 10.0}, "heading_deg": {"value": 10.0},
+    }}})
+    correlation.add_telemetry("rtk", {"android_mono_ns": 100, "data": {"fields": {
+        "fusion.latitude_deg": {"value": 38.01}, "fusion.longitude_deg": {"value": -9.01}, "is_being_used": {"value": True},
+    }}})
+    selected = correlation.associate_android_time(110)
+    assert selected["association_quality"] == "nearest"
+    assert selected["position_source"] == "rtk"
+    assert selected["latitude_deg"] == pytest.approx(38.01)
+    stale = correlation.associate_android_time(1_000)
+    assert stale["association_quality"] == "unavailable"
+    assert stale["position_valid"] is False
+
+
+def test_temporal_correlation_is_bounded_and_clears_on_session_change():
+    correlation = TemporalCorrelation(max_samples=2, max_gap_ns=100)
+    correlation.start_session("first")
+    for timestamp in (1, 2, 3):
+        correlation.add_telemetry("flight", {"android_mono_ns": timestamp, "data": {"fields": {}}})
+    assert correlation.snapshot()["history_sizes"]["flight"] == 2
+    correlation.start_session("second")
+    assert correlation.snapshot()["history_sizes"]["flight"] == 0
+
+
+def test_latest_state_associates_rtp_au_to_frame_time_not_latest_state():
+    state, sequences = LatestState(ClockMapper()), SequenceTracker()
+
+    def ingest(raw, received):
+        packet = decode_json_packet(json.dumps(raw).encode(), 1)
+        sequence = sequences.observe((packet.session, packet.packet_type, packet.stream), packet.sequence)
+        assert state.update_packet(packet, received, ("127.0.0.1", 5500), sequence)
+
+    common = {"v": 1, "session": "s", "stream": "flight:0"}
+    ingest({**common, "type": "flight", "seq": 1, "rx_mono_ns": 100, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.0}, "aircraft.longitude_deg": {"value": -9.0}, "aircraft.altitude_m": {"value": 10.0}, "heading_deg": {"value": 5.0},
+    }}}, 200)
+    ingest({**common, "type": "flight", "seq": 2, "rx_mono_ns": 300, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.2}, "aircraft.longitude_deg": {"value": -8.8}, "aircraft.altitude_m": {"value": 14.0}, "heading_deg": {"value": 15.0},
+    }}}, 400)
+    ingest({"v": 1, "type": "video_au", "session": "s", "feed": "primary", "frame_seq": 7, "rtp_ssrc": 88, "rtp_ts": 99, "au_first_byte_rx_mono_ns": 190, "au_complete_rx_mono_ns": 200}, 500)
+    identity, navigation = state.associate_frame("primary", 88, 99)
+    assert identity["frame_seq"] == 7
+    assert navigation["latitude_deg"] == pytest.approx(38.1)
+    assert navigation["heading_deg"] == pytest.approx(10.0)
+    assert state.associate_frame("primary", 88, 100) is None
+
+
 def test_dashboard_serves_state_health_and_clean_exit_callback():
     exits = []
     dashboard = DashboardServer("127.0.0.1", 0, lambda: {"status": "ok", "video": []}, lambda: exits.append(True))
@@ -202,3 +313,41 @@ def test_dashboard_serves_state_health_and_clean_exit_callback():
         assert exits == [True]
     finally:
         dashboard.close()
+
+
+def test_dashboard_configuration_api_calls_only_validated_saver():
+    saved = []
+    dashboard = DashboardServer(
+        "127.0.0.1", 0, lambda: {"status": "ok", "video": []}, lambda: None,
+        lambda: {"values": {"android_clock_host": "", "capture_rtp": False, "preview_windows": True}},
+        lambda values, restart: saved.append((values, restart)) or {"status": "saved", "restarting": restart},
+    )
+    dashboard.start()
+    try:
+        base = f"http://127.0.0.1:{dashboard.port}"
+        assert json.loads(urlopen(f"{base}/v1/config", timeout=2).read())["values"]["capture_rtp"] is False
+        request = Request(f"{base}/v1/config", data=json.dumps({"values": {"android_clock_host": "192.168.1.2", "capture_rtp": True, "preview_windows": False}, "restart": True}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+        assert json.loads(urlopen(request, timeout=2).read())["restarting"] is True
+        assert saved == [({"android_clock_host": "192.168.1.2", "capture_rtp": True, "preview_windows": False}, True)]
+    finally:
+        dashboard.close()
+
+
+def test_local_dashboard_config_validates_and_writes_atomically(tmp_path):
+    target = tmp_path / "bridge.local.yaml"
+    values = {"android_clock_host": "192.168.1.151", "capture_rtp": True, "preview_windows": False}
+    atomic_write(target, values)
+    assert 'android_clock_host: "192.168.1.151"' in target.read_text()
+    before = target.read_text()
+    with pytest.raises(ValueError):
+        atomic_write(target, {"android_clock_host": "bad host!", "capture_rtp": True, "preview_windows": False})
+    assert target.read_text() == before
+
+
+@pytest.mark.parametrize("values", [
+    {"android_clock_host": "", "capture_rtp": "true", "preview_windows": False},
+    {"android_clock_host": "127.0.0.1", "capture_rtp": False, "preview_windows": True, "port": 5600},
+])
+def test_local_dashboard_config_rejects_outside_allowlist(values):
+    with pytest.raises(ValueError):
+        validate(values)
