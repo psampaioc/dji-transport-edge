@@ -52,6 +52,24 @@ Only `primary` and `fpv` are valid configured feed names. Physical DJI sources s
 
 RTP is RFC 3550/RFC 6184 H.264, payload type 96 by default, 90 kHz clock, one SSRC and sequence space per logical feed.
 
+## Access-unit source-time contract
+
+Each `video_au` identifies one completed Android H.264 access unit with
+`session`, logical `feed`, `frame_seq`, `rtp_ssrc`, `rtp_ts`,
+`au_first_byte_rx_mono_ns`, and `au_complete_rx_mono_ns`. Both monotonic values
+are Android `elapsedRealtimeNanos()` observations and are immutable source data:
+the Edge must preserve them and use the AU completion time to select telemetry
+for that frame.
+
+`dji_source_timestamp_ns` is optional. When present it **must** be accompanied
+by `dji_timestamp_source`, which names the documented DJI callback/API clock.
+It is retained as separate source metadata; it never replaces Android monotonic
+time unless a later, explicit contract says so.
+
+Edge receive, decode, and ROS-delivery times are separate diagnostic
+observations. They may measure transport latency but are never frame identity,
+camera time, or a telemetry correlation key.
+
 ## Clock packets
 
 `clock_ping` requires positive `t0_edge_send_mono_ns`. `clock_pong` additionally requires positive `t1_android_rx_mono_ns` and `t2_android_tx_mono_ns >= t1_android_rx_mono_ns`.

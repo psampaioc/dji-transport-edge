@@ -8,7 +8,7 @@ from dji_edge_transport_core.clock import ClockMapper
 from dji_edge_transport_core.dashboard import DashboardServer
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
 from dji_edge_transport_core.navigation import build_navigation
-from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet
+from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet, video_au_identity
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
 from dji_edge_transport_core.state import LatestState, SequenceTracker
 from dji_edge_transport_core.video import LatestFrameBuffer
@@ -29,6 +29,30 @@ def test_golden_control_packets_decode_with_stable_envelopes():
     assert [packet.packet_type for packet in decoded] == ["flight", "rtk", "gimbal", "battery", "health", "video_au"]
     assert decoded[-1].stream == "primary"
     assert decoded[-1].body["rtp_ssrc"] == 305419896
+
+
+def test_video_au_identity_keeps_android_time_and_optional_dji_time_separate():
+    packet = decode_json_packet(json.dumps({
+        "v": 1, "type": "video_au", "session": "s", "feed": "primary", "frame_seq": 9,
+        "rtp_ssrc": 12, "rtp_ts": 34, "au_first_byte_rx_mono_ns": 100,
+        "au_complete_rx_mono_ns": 125, "dji_source_timestamp_ns": 77,
+        "dji_timestamp_source": "dji_callback_documented_clock",
+    }).encode(), 1)
+    identity = video_au_identity(packet)
+    assert identity.android_first_byte_mono_ns == 100
+    assert identity.android_complete_mono_ns == 125
+    assert identity.dji_source_timestamp_ns == 77
+    assert identity.dji_timestamp_source == "dji_callback_documented_clock"
+
+
+@pytest.mark.parametrize("packet", [
+    {"v": 1, "type": "video_au", "session": "s", "feed": "other", "frame_seq": 1, "rtp_ssrc": 1, "rtp_ts": 2, "au_first_byte_rx_mono_ns": 3},
+    {"v": 1, "type": "video_au", "session": "s", "feed": "primary", "frame_seq": 1, "rtp_ssrc": 1, "rtp_ts": 2, "au_first_byte_rx_mono_ns": 3, "dji_timestamp_source": "orphan"},
+])
+def test_video_au_identity_rejects_invalid_contract(packet):
+    with pytest.raises(ProtocolError):
+        decoded = decode_json_packet(json.dumps(packet).encode(), 1)
+        video_au_identity(decoded)
 
 
 def test_complete_fragment_replaces_no_partial_state_and_duplicate_is_ignored():

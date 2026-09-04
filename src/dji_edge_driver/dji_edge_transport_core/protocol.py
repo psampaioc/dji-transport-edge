@@ -47,6 +47,21 @@ class RtpPacket:
     payload_size: int
 
 
+@dataclass(frozen=True)
+class VideoAuIdentity:
+    """Immutable Android-origin identity for one completed H.264 access unit."""
+
+    session: str
+    feed: str
+    frame_seq: int
+    rtp_ssrc: int
+    rtp_ts: int
+    android_first_byte_mono_ns: int
+    android_complete_mono_ns: int
+    dji_source_timestamp_ns: int | None
+    dji_timestamp_source: str | None
+
+
 def _integer(value: Any, name: str, minimum: int = 0) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ProtocolError(f"{name} must be an integer >= {minimum}")
@@ -105,6 +120,11 @@ def decode_json_packet(data: bytes, expected_version: int, max_bytes: int = 1200
         for name in ("first_rtp_seq", "final_rtp_seq"):
             if name in obj:
                 _integer(obj[name], name)
+        if "dji_source_timestamp_ns" in obj:
+            _integer(obj["dji_source_timestamp_ns"], "dji_source_timestamp_ns", 1)
+            _string(obj.get("dji_timestamp_source"), "dji_timestamp_source", 96)
+        elif "dji_timestamp_source" in obj:
+            raise ProtocolError("dji_timestamp_source requires dji_source_timestamp_ns")
         android_mono_ns = first_ns
         body = {key: value for key, value in obj.items() if key not in _ENVELOPE_FIELDS}
         body["au_complete_rx_mono_ns"] = complete_ns
@@ -128,6 +148,31 @@ def decode_json_packet(data: bytes, expected_version: int, max_bytes: int = 1200
             raise ProtocolError("data must be an object")
     _finite_tree(body)
     return Packet(version, packet_type, session, stream, sequence, android_mono_ns, body, obj)
+
+
+def video_au_identity(packet: Packet) -> VideoAuIdentity:
+    """Return a validated source-time identity, never an Edge-derived timestamp."""
+    if packet.packet_type != "video_au":
+        raise ProtocolError("video access-unit identity requires a video_au packet")
+    if packet.stream not in {"primary", "fpv"}:
+        raise ProtocolError(f"unsupported logical video feed {packet.stream!r}")
+    complete = _integer(packet.body.get("au_complete_rx_mono_ns"), "au_complete_rx_mono_ns", packet.android_mono_ns)
+    dji_timestamp = packet.body.get("dji_source_timestamp_ns")
+    dji_source = packet.body.get("dji_timestamp_source")
+    if dji_timestamp is not None:
+        dji_timestamp = _integer(dji_timestamp, "dji_source_timestamp_ns", 1)
+        dji_source = _string(dji_source, "dji_timestamp_source", 96)
+    return VideoAuIdentity(
+        session=packet.session,
+        feed=packet.stream,
+        frame_seq=packet.sequence,
+        rtp_ssrc=_integer(packet.body.get("rtp_ssrc"), "rtp_ssrc"),
+        rtp_ts=_integer(packet.body.get("rtp_ts"), "rtp_ts"),
+        android_first_byte_mono_ns=packet.android_mono_ns,
+        android_complete_mono_ns=complete,
+        dji_source_timestamp_ns=dji_timestamp,
+        dji_timestamp_source=dji_source,
+    )
 
 
 def parse_rtp_packet(data: bytes, expected_payload_type: int | None = None) -> RtpPacket:
