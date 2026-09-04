@@ -143,3 +143,17 @@ python3 /workspace/src/dji_edge_driver/scripts/capture_transport_bench.py \
 ```
 
 The script only reads the local dashboard. The resulting JSON preserves each dashboard sample, including the exact evidence session path, pre-network Android health, post-network RTP/AU metrics, image publish/drop counters, clock state, navigation source, and both feeds. It does not capture raw RTP or issue any DJI command.
+
+## Final integrated props-off acceptance
+
+Run this once after the tablet is connected to the Cendence/drone with props off.
+
+1. In a fresh terminal, run `source ~/.zshrc` then `djiedge-run`. It builds, opens the two native GStreamer previews and RViz, and serves the dashboard at `http://127.0.0.1:8090`.
+2. In the dashboard, verify the shown Ubuntu IPv4 address; use that address in the tablet transport screen. Confirm `capture_rtp` is off unless this is a short packet-diagnostic capture.
+3. Enable Android transport. On dashboard/RViz verify Primary RTP bytes, decoded frames, ROS frames and Primary image growth. RViz must show the cyan navigation path and yellow `/dji/frame/pose` marker separately. A context counter marked unavailable is honest evidence of an AU/telemetry association failure, not a position estimate.
+4. Select FPV in the tablet. Verify the native FPV window, `/dji/fpv/image_raw`, FPV RTP/AU counters and FPV frame-context counters independently. If Android callbacks grow while Edge FPV RTP stays zero, record that as Android emission failure; do not call it an Edge decode pass.
+5. Observe navigation source. RTK is preferred when `is_being_used` is valid; otherwise the path must continue as GPS fallback with aircraft-relative altitude. Verify gimbal pitch validity in `FrameContext`/evidence.
+6. Change only a safe dashboard value, use **Save and restart**, and wait for the dashboard/RViz to return once. Confirm the selected value persists and the process list contains one driver/mapper/RViz stack. Use **Exit** afterward and confirm it does not restart.
+7. Run the 60-second bench command above. Retain its JSON and the dashboard evidence-session directory. Attach them to issues #1–#3 together with a note saying whether Primary, FPV, RTK, clock and frame contexts were actually observed.
+
+This acceptance path never issues a DJI flight, mission, gimbal, arm, takeoff, or landing command.
