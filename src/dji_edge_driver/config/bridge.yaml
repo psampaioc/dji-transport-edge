@@ -26,5 +26,7 @@
     primary_context_topic: "/dji/primary/frame_context"
     fpv_context_topic: "/dji/fpv/frame_context"
     navigation_topic: "/dji/navigation/state"
+    mapper_status_topic: "/dji/navigation/status"
+    mapper_status_stale_s: 3.0
     diagnostics_topic: "/dji/diagnostics"
     transport_metrics_topic: "/dji/edge/transport_metrics"

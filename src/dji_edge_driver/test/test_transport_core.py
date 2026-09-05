@@ -12,6 +12,12 @@ from dji_edge_transport_core.dashboard import DashboardServer, start_optional_da
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
 from dji_edge_transport_core import local_config
 from dji_edge_transport_core.local_config import atomic_write, resolve_ipv4_udp_target, save_requested_config, validate
+from dji_edge_transport_core import mapper_config
+from dji_edge_transport_core.mapper_config import atomic_write as atomic_write_mapper_config
+from dji_edge_transport_core.mapper_config import load as load_mapper_config
+from dji_edge_transport_core.mapper_config import save_requested_config as save_mapper_config
+from dji_edge_transport_core.mapper_config import validate as validate_mapper_config
+from dji_edge_transport_core.mapper_status import MapperStatusCache
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet, video_au_identity
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
@@ -506,3 +512,115 @@ def test_busy_dashboard_port_is_reported_without_raising():
 def test_local_dashboard_config_rejects_outside_allowlist(values):
     with pytest.raises(ValueError):
         validate(values)
+
+
+def test_mapper_dashboard_config_is_narrow_and_preserves_unlimited_history(tmp_path):
+    target = tmp_path / "mapper.runtime.local.yaml"
+    values = {"min_path_spacing_m": 0.15, "max_history_points": 0}
+    atomic_write_mapper_config(target, values)
+    rendered = target.read_text(encoding="utf-8")
+    assert "min_path_spacing_m: 0.15" in rendered
+    assert "max_history_points: 0" in rendered
+    assert "map_metadata_path" not in rendered
+    assert load_mapper_config(target) == values
+
+
+@pytest.mark.parametrize("values", [
+    {"min_path_spacing_m": -0.1, "max_history_points": 5},
+    {"min_path_spacing_m": float("inf"), "max_history_points": 5},
+    {"min_path_spacing_m": 0.1, "max_history_points": -1},
+    {"min_path_spacing_m": 0.1, "max_history_points": 2.0},
+    {"min_path_spacing_m": 0.1, "max_history_points": 5, "utm_zone": 29},
+])
+def test_mapper_dashboard_config_rejects_unsafe_or_invalid_values(values):
+    with pytest.raises(ValueError):
+        validate_mapper_config(values)
+
+
+def test_mapper_dashboard_config_atomic_failure_keeps_existing_file(tmp_path, monkeypatch):
+    target = tmp_path / "mapper.runtime.local.yaml"
+    target.write_text("known-good\n", encoding="utf-8")
+    monkeypatch.setattr(mapper_config.os, "replace", lambda *_: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        atomic_write_mapper_config(target, {"min_path_spacing_m": 0.1, "max_history_points": 20})
+    assert target.read_text(encoding="utf-8") == "known-good\n"
+
+
+def test_mapper_restart_marker_failure_keeps_stack_running(tmp_path, monkeypatch):
+    target = tmp_path / "mapper.runtime.local.yaml"
+    marker = tmp_path / "restart.request"
+    stopped = []
+    original_write_text = Path.write_text
+
+    def fail_marker(path, *args, **kwargs):
+        if path == marker:
+            raise OSError("marker volume is read-only")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_marker)
+    with pytest.raises(OSError, match="restart was not requested"):
+        save_mapper_config(
+            {"min_path_spacing_m": 0.1, "max_history_points": 20}, target, marker,
+            restart=True, request_stop=lambda: stopped.append(True),
+        )
+    assert stopped == []
+    assert load_mapper_config(target) == {"min_path_spacing_m": 0.1, "max_history_points": 20}
+
+
+def test_mapper_status_cache_is_bounded_and_keeps_last_valid_snapshot():
+    cache = MapperStatusCache()
+    valid = {"accepted": 3, "accepted_rtk": 2, "received": 3, "path_poses": 4}
+    cache.observe(json.dumps(valid), 1_000_000_000)
+    assert cache.snapshot(3.0, 2_000_000_000)["state"] == "ok"
+    cache.observe('{"accepted": -1}', 2_000_000_000)
+    invalid = cache.snapshot(3.0, 2_000_000_000)
+    assert invalid["state"] == "invalid"
+    assert invalid["values"] == valid
+    cache.observe(json.dumps({"accepted": 5, "received": 5, "path_poses": 5}), 2_000_000_000)
+    assert cache.snapshot(3.0, 6_000_000_001)["state"] == "stale"
+
+
+def test_dashboard_mapper_configuration_api_is_separate_and_safe():
+    saved = []
+    dashboard = DashboardServer(
+        "127.0.0.1", 0, lambda: {"status": "ok", "video": []}, lambda: None,
+        mapper_config_provider=lambda: {"values": {"min_path_spacing_m": 0.15, "max_history_points": 5000}, "status": {"state": "unavailable"}},
+        mapper_config_saver=lambda values, restart: saved.append((values, restart)) or {"status": "saved", "restarting": restart},
+    )
+    dashboard.start()
+    try:
+        base = f"http://127.0.0.1:{dashboard.port}"
+        payload = json.loads(urlopen(f"{base}/v1/mapper-config", timeout=2).read())
+        assert payload["values"]["max_history_points"] == 5000
+        request = Request(
+            f"{base}/v1/mapper-config",
+            data=json.dumps({"values": {"min_path_spacing_m": 0.2, "max_history_points": 0}, "restart": True}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        assert json.loads(urlopen(request, timeout=2).read())["restarting"] is True
+        assert saved == [({"min_path_spacing_m": 0.2, "max_history_points": 0}, True)]
+        page = urlopen(f"{base}/", timeout=2).read().decode()
+        assert "Map &amp; Path" in page
+        assert "map_metadata_path" not in page
+    finally:
+        dashboard.close()
+
+
+def test_dashboard_mapper_configuration_rejects_invalid_requests():
+    dashboard = DashboardServer(
+        "127.0.0.1", 0, lambda: {"status": "ok", "video": []}, lambda: None,
+        mapper_config_provider=lambda: {"values": {"min_path_spacing_m": 0.15, "max_history_points": 5000}},
+        mapper_config_saver=lambda values, restart: validate_mapper_config(values) or {"restarting": restart},
+    )
+    dashboard.start()
+    try:
+        request = Request(
+            f"http://127.0.0.1:{dashboard.port}/v1/mapper-config",
+            data=json.dumps({"values": {"min_path_spacing_m": -1, "max_history_points": 5}, "restart": False}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with pytest.raises(HTTPError) as raised:
+            urlopen(request, timeout=2)
+        assert raised.value.code == 400
+    finally:
+        dashboard.close()

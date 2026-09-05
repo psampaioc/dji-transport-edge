@@ -12,13 +12,18 @@ from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from dji_edge_driver.msg import FrameContext, NavigationState
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 
 from dji_edge_transport_core.clock import ClockMapper
 from dji_edge_transport_core.dashboard import start_optional_dashboard
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
 from dji_edge_transport_core.local_config import resolve_ipv4_udp_target, save_requested_config
+from dji_edge_transport_core.mapper_config import DEFAULT_VALUES as MAPPER_DEFAULT_VALUES
+from dji_edge_transport_core.mapper_config import load as load_mapper_config
+from dji_edge_transport_core.mapper_config import save_requested_config as save_mapper_config
+from dji_edge_transport_core.mapper_status import MapperStatusCache
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import CLOCK_TYPES, FRAME_TYPES, ProtocolError, decode_json_packet, parse_rtp_packet
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
@@ -37,9 +42,11 @@ PARAMETERS = {
     "primary_topic": "/dji/primary/image_raw", "fpv_topic": "/dji/fpv/image_raw",
     "primary_context_topic": "/dji/primary/frame_context", "fpv_context_topic": "/dji/fpv/frame_context",
     "navigation_topic": "/dji/navigation/state",
+    "mapper_status_topic": "/dji/navigation/status", "mapper_status_stale_s": 3.0,
     "diagnostics_topic": "/dji/diagnostics",
     "transport_metrics_topic": "/dji/edge/transport_metrics",
-    "local_config_path": "/workspace/bridge.local.yaml", "restart_request_path": "/workspace/.runtime/dji-edge-restart.request",
+    "local_config_path": "/workspace/bridge.local.yaml", "mapper_runtime_config_path": "/workspace/mapper.runtime.local.yaml",
+    "restart_request_path": "/workspace/.runtime/dji-edge-restart.request",
 }
 
 
@@ -238,6 +245,12 @@ class EdgeBridge(Node):
         self.sequences = SequenceTracker()
         self.accepted = self.rejected = self.clock_pongs = self.clock_sequence = 0
         self.endpoint_errors = {}
+        self.mapper_status = MapperStatusCache()
+        self.mapper_config_pending_restart = False
+        mapper_status_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.mapper_status_subscription = self.create_subscription(
+            String, self.parameter("mapper_status_topic"), self._on_mapper_status, mapper_status_qos,
+        )
 
         self.inputs = [
             UdpEndpoint(self, "telemetry", self.parameter("telemetry_port")),
@@ -282,6 +295,8 @@ class EdgeBridge(Node):
             self.stop_requested.set,
             self.dashboard_config,
             self.save_dashboard_config,
+            self.mapper_dashboard_config,
+            self.save_mapper_dashboard_config,
             on_error=lambda error: self._record_dashboard_error(host, error),
         )
         if dashboard is not None:
@@ -318,6 +333,46 @@ class EdgeBridge(Node):
             restart=restart,
             request_stop=self.stop_requested.set,
         )
+
+    def _on_mapper_status(self, message):
+        """Cache existing one-hertz mapper status; never touch transport ingress."""
+        self.mapper_status.observe(message.data)
+
+    def mapper_dashboard_config(self):
+        path = Path(self.parameter("mapper_runtime_config_path"))
+        try:
+            values = load_mapper_config(path) or MAPPER_DEFAULT_VALUES
+            config_error = None
+        except (OSError, ValueError) as error:
+            values = MAPPER_DEFAULT_VALUES
+            config_error = str(error)
+        status = self.mapper_status.snapshot(float(self.parameter("mapper_status_stale_s")))
+        return {
+            "source": str(path) if path.exists() else "mapper defaults or private mapper.local.yaml",
+            "values": values,
+            "pending_restart": self.mapper_config_pending_restart,
+            "status": {**status, "error": config_error or status["error"]},
+        }
+
+    def save_mapper_dashboard_config(self, values, restart):
+        try:
+            result = save_mapper_config(
+                values,
+                self.parameter("mapper_runtime_config_path"),
+                self.parameter("restart_request_path"),
+                restart=restart,
+                request_stop=self.stop_requested.set,
+            )
+        except OSError:
+            # The configuration write is atomic and may have succeeded before
+            # the supervised-restart marker failed.  Report it as pending
+            # rather than claiming the currently running mapper changed.
+            self.mapper_config_pending_restart = Path(
+                self.parameter("mapper_runtime_config_path")
+            ).is_file()
+            raise
+        self.mapper_config_pending_restart = not restart
+        return result
 
     def ingest(self, category, data, remote, edge_receive_ns, response_socket):
         try:
@@ -493,11 +548,13 @@ class EdgeBridge(Node):
                 "primary_topic": self.parameter("primary_topic"),
                 "fpv_topic": self.parameter("fpv_topic"),
                 "navigation_topic": self.parameter("navigation_topic"),
+                "mapper_status_topic": self.parameter("mapper_status_topic"),
             },
             "android_pre_network": state["health"],
             "edge_post_network": {"transport": state["transport"], "video": videos},
             "transport": state["transport"],
             "navigation": build_navigation(state),
+            "mapper": self.mapper_dashboard_config(),
             "video": videos,
             "udp_errors": self.endpoint_errors,
         }

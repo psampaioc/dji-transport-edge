@@ -23,6 +23,7 @@ config.toml
 *.local.toml
 *.local.yaml
 *.local.yml
+mapper.runtime.local.yaml
 *.local.json
 .env
 .env.*

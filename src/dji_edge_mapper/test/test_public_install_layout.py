@@ -1,4 +1,5 @@
 from pathlib import Path
+import importlib.util
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
@@ -36,3 +37,30 @@ def test_localizer_never_uses_ros_delivery_header_as_a_timing_fallback():
 
     assert "header_stamp_ns" not in localizer
     assert "stamp_ns = message.edge_receive_mono_ns" in localizer
+
+
+def test_mapper_runtime_overlay_is_last_and_only_used_when_it_exists(tmp_path, monkeypatch):
+    launch_path = PACKAGE_ROOT / "launch" / "dji_edge_mapper.launch.py"
+    spec = importlib.util.spec_from_file_location("dji_edge_mapper_launch", launch_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class Value:
+        def __init__(self, value):
+            self.value = value
+
+        def perform(self, _context):
+            return self.value
+
+    captured = []
+    monkeypatch.setattr(module, "Node", lambda **kwargs: captured.append(kwargs) or kwargs)
+    base = str(tmp_path / "mapper.local.yaml")
+    runtime = tmp_path / "mapper.runtime.local.yaml"
+
+    module.mapper_nodes(None, Value(base), Value(str(runtime)))
+    assert [node["parameters"] for node in captured] == [[base], [base]]
+
+    runtime.write_text("/drone_localization_node:\n", encoding="utf-8")
+    captured.clear()
+    module.mapper_nodes(None, Value(base), Value(str(runtime)))
+    assert [node["parameters"] for node in captured] == [[base, str(runtime)], [base, str(runtime)]]
