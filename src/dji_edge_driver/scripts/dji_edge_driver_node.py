@@ -246,7 +246,6 @@ class EdgeBridge(Node):
         self.accepted = self.rejected = self.clock_pongs = self.clock_sequence = 0
         self.endpoint_errors = {}
         self.mapper_status = MapperStatusCache()
-        self.mapper_config_pending_restart = False
         mapper_status_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.mapper_status_subscription = self.create_subscription(
             String, self.parameter("mapper_status_topic"), self._on_mapper_status, mapper_status_qos,
@@ -341,38 +340,31 @@ class EdgeBridge(Node):
     def mapper_dashboard_config(self):
         path = Path(self.parameter("mapper_runtime_config_path"))
         try:
-            values = load_mapper_config(path) or MAPPER_DEFAULT_VALUES
+            requested_values = load_mapper_config(path)
             config_error = None
         except (OSError, ValueError) as error:
-            values = MAPPER_DEFAULT_VALUES
+            requested_values = None
             config_error = str(error)
         status = self.mapper_status.snapshot(float(self.parameter("mapper_status_stale_s")))
+        active_values = status["active_values"]
+        values = requested_values or active_values or MAPPER_DEFAULT_VALUES
         return {
             "source": str(path) if path.exists() else "mapper defaults or private mapper.local.yaml",
             "values": values,
-            "pending_restart": self.mapper_config_pending_restart,
+            "requested_values": requested_values,
+            "active_values": active_values,
+            "pending_restart": requested_values is not None and requested_values != active_values,
             "status": {**status, "error": config_error or status["error"]},
         }
 
     def save_mapper_dashboard_config(self, values, restart):
-        try:
-            result = save_mapper_config(
-                values,
-                self.parameter("mapper_runtime_config_path"),
-                self.parameter("restart_request_path"),
-                restart=restart,
-                request_stop=self.stop_requested.set,
-            )
-        except OSError:
-            # The configuration write is atomic and may have succeeded before
-            # the supervised-restart marker failed.  Report it as pending
-            # rather than claiming the currently running mapper changed.
-            self.mapper_config_pending_restart = Path(
-                self.parameter("mapper_runtime_config_path")
-            ).is_file()
-            raise
-        self.mapper_config_pending_restart = not restart
-        return result
+        return save_mapper_config(
+            values,
+            self.parameter("mapper_runtime_config_path"),
+            self.parameter("restart_request_path"),
+            restart=restart,
+            request_stop=self.stop_requested.set,
+        )
 
     def ingest(self, category, data, remote, edge_receive_ns, response_socket):
         try:

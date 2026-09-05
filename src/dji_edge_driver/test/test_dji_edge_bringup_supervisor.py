@@ -6,6 +6,13 @@ import subprocess
 SCRIPT = Path(__file__).parents[1] / "scripts" / "dji_edge_bringup.sh"
 
 
+def test_supervisor_source_is_executable_and_install_name_is_stable():
+    cmake = (Path(__file__).parents[1] / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    assert os.access(SCRIPT, os.X_OK)
+    assert "RENAME dji_edge_bringup" in cmake
+
+
 def run_supervisor(tmp_path, *, marker=False, child_exit=0):
     workspace = tmp_path / "workspace"
     (workspace / "install").mkdir(parents=True)

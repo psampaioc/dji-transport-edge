@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 
 
@@ -13,13 +14,14 @@ COUNTERS = frozenset({
     "rejected_outside_map", "rejected_projection",
 })
 REQUIRED_COUNTERS = frozenset({"accepted", "received", "path_poses"})
+ACTIVE_VALUES = frozenset({"active_min_path_spacing_m", "active_max_history_points"})
 
 
 class MapperStatusCache:
     """Retains one valid observation; invalid input never replaces it."""
 
     def __init__(self) -> None:
-        self.values: dict[str, int] | None = None
+        self.values: dict[str, int | float] | None = None
         self.received_mono_ns: int | None = None
         self.error: str | None = None
 
@@ -30,9 +32,21 @@ class MapperStatusCache:
             payload = json.loads(data)
             if not isinstance(payload, dict) or not REQUIRED_COUNTERS.issubset(payload) or any(
                 key not in COUNTERS or isinstance(value, bool) or not isinstance(value, int) or value < 0
-                for key, value in payload.items()
+                for key, value in payload.items() if key not in ACTIVE_VALUES
             ):
                 raise ValueError("mapper status has invalid counters")
+            active_keys = ACTIVE_VALUES.intersection(payload)
+            if active_keys and active_keys != ACTIVE_VALUES:
+                raise ValueError("mapper status has incomplete active path values")
+            if active_keys:
+                spacing = payload["active_min_path_spacing_m"]
+                history = payload["active_max_history_points"]
+                if (
+                    isinstance(spacing, bool) or not isinstance(spacing, (int, float))
+                    or not math.isfinite(spacing) or spacing < 0
+                    or isinstance(history, bool) or not isinstance(history, int) or history < 0
+                ):
+                    raise ValueError("mapper status has invalid active path values")
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             self.error = str(error)
             return
@@ -44,4 +58,16 @@ class MapperStatusCache:
         now = time.monotonic_ns() if now_mono_ns is None else now_mono_ns
         age_s = None if self.received_mono_ns is None else max(0.0, (now - self.received_mono_ns) / 1e9)
         state = "invalid" if self.error else "unavailable" if self.values is None else "stale" if age_s is not None and age_s > stale_after_s else "ok"
-        return {"state": state, "age_s": age_s, "values": self.values, "error": self.error}
+        active_values = None
+        if self.values is not None and ACTIVE_VALUES.issubset(self.values):
+            active_values = {
+                "min_path_spacing_m": float(self.values["active_min_path_spacing_m"]),
+                "max_history_points": self.values["active_max_history_points"],
+            }
+        return {
+            "state": state,
+            "age_s": age_s,
+            "values": self.values,
+            "active_values": active_values,
+            "error": self.error,
+        }

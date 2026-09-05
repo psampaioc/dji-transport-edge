@@ -52,10 +52,10 @@ It opens one Docker container named `dji_edge_humble_dev`, mounted at `/workspac
 ```bash
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
-ros2 launch dji_edge_driver dji_edge_bringup.launch.py
+ros2 run dji_edge_driver dji_edge_bringup
 ```
 
-The launch starts the driver, mapper, dashboard, both native GStreamer previews, and the preconfigured RViz view. RViz shows the Primary ROS image, the map, cyan continuous path, and yellow frame-synchronous pose. The terminal remains attached to the pipeline. `djiedge-run` is an optional host convenience command with the same build/source/launch sequence.
+The managed supervisor starts the driver, mapper, dashboard, both native GStreamer previews, and the preconfigured RViz view. It also consumes exactly one dashboard restart request before starting one replacement stack. RViz shows the Primary ROS image, the map, cyan continuous path, and yellow frame-synchronous pose. The terminal remains attached to the pipeline. `djiedge-run` is an optional host convenience command with the same build/source/managed-launch sequence.
 
 For headless Docker checks or a machine without X11, keep the exact same transport/map bringup and disable only RViz:
 
@@ -108,7 +108,7 @@ The committed defaults are in [bridge.yaml](src/dji_edge_driver/config/bridge.ya
 
 The dashboard Transport tab writes only `android_clock_host`, `capture_rtp`, and `preview_windows` to the ignored `/workspace/bridge.local.yaml`. The clock target accepts an IPv4 literal or hostname resolved through IPv4 UDP; IPv6 is deliberately rejected because the Android clock contract is IPv4. It shows the local Ubuntu IPv4 addresses to copy into the tablet and never exposes ports, paths, shell commands, or flight controls. **Save** persists for the next launch; **Save and restart** persists then requests exactly one managed stack relaunch only after its marker is written successfully. Filesystem errors are returned to the dashboard without stopping the running stack.
 
-The **Map & Path** tab is separate. It writes only `min_path_spacing_m` and `max_history_points` to the ignored `/workspace/mapper.runtime.local.yaml`, loaded after the private `mapper.local.yaml`. It never rewrites the point-cloud, calibration, UTM zone, map bounds, topics, or safety gates. `max_history_points: 0` means keep the full route; use it when the complete mission track matters, knowing that memory grows with every accepted pose. A positive number retains only that many newest poses. The tab shows the existing one-hertz mapper status: accepted samples, RTK versus GPS fallback, rejected samples, path poses, and frame-context association counts. It reports unavailable, invalid, or stale status rather than guessing that localization is healthy.
+The **Map & Path** tab is separate. It writes only `min_path_spacing_m` and `max_history_points` to the ignored `/workspace/mapper.runtime.local.yaml`, loaded after the private `mapper.local.yaml`. It never rewrites the point-cloud, calibration, UTM zone, map bounds, topics, or safety gates. `max_history_points: 0` means keep the full route; use it when the complete mission track matters, knowing that memory grows with every accepted pose. A positive number retains only that many newest poses. The tab shows the mapper's existing one-hertz status: active path values, accepted samples, RTK versus GPS fallback, rejected samples, path poses, and received/published/rejected/unavailable frame-context counts. A saved value is **pending** until the replacement mapper reports it as active; unavailable, invalid, or stale status is shown rather than guessed.
 
 The dashboard is an optional loopback observer. If `127.0.0.1:8090` is already occupied, the terminal records the collision and direct UDP/RTP, ROS, evidence, mapper, and clean shutdown continue normally; the stack never chooses another port silently.
 
@@ -120,7 +120,7 @@ cp src/dji_edge_driver/config/bridge.yaml bridge.local.yaml
 
 The normal package launcher automatically prefers this ignored file when it exists. Delete it to return to committed defaults.
 
-`djiedge-run` uses this managed launcher, so dashboard **Save and restart** returns to the same command session after one clean shutdown. If launching manually inside `djiedge`, use `ros2 run dji_edge_driver dji_edge_bringup` rather than invoking `ros2 launch` directly.
+`djiedge-run` uses this managed launcher, so dashboard **Save and restart** returns to the same command session after one clean shutdown. If launching manually inside `djiedge`, use `ros2 run dji_edge_driver dji_edge_bringup`. Direct `ros2 launch` remains useful for diagnostics, but it does not supervise a dashboard restart request.
 
 ## Evidence and recording
 

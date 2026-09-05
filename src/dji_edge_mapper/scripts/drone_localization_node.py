@@ -226,6 +226,8 @@ class DroneLocalizationNode(Node):
                 "accepted": self.counts["accepted"],
                 "accepted_gps_fallback": self.counts["accepted_gps_fallback"],
                 "accepted_rtk": self.counts["accepted_rtk"],
+                "active_min_path_spacing_m": self.min_path_spacing_m,
+                "active_max_history_points": self.max_history,
                 "frame_context_published": self.counts["frame_context_published"],
                 "frame_context_received": self.counts["frame_context_received"],
                 "frame_context_rejected": self.counts["frame_context_rejected"],

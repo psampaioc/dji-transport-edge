@@ -30,6 +30,7 @@ install(PROGRAMS
 
 install(PROGRAMS scripts/dji_edge_bringup.sh
   DESTINATION lib/${PROJECT_NAME}
+  RENAME dji_edge_bringup
 )
 
 install(DIRECTORY launch config

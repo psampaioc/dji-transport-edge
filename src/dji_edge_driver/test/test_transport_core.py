@@ -569,9 +569,18 @@ def test_mapper_restart_marker_failure_keeps_stack_running(tmp_path, monkeypatch
 
 def test_mapper_status_cache_is_bounded_and_keeps_last_valid_snapshot():
     cache = MapperStatusCache()
-    valid = {"accepted": 3, "accepted_rtk": 2, "received": 3, "path_poses": 4}
+    valid = {
+        "accepted": 3,
+        "accepted_rtk": 2,
+        "received": 3,
+        "path_poses": 4,
+        "active_min_path_spacing_m": 0.15,
+        "active_max_history_points": 5000,
+    }
     cache.observe(json.dumps(valid), 1_000_000_000)
-    assert cache.snapshot(3.0, 2_000_000_000)["state"] == "ok"
+    snapshot = cache.snapshot(3.0, 2_000_000_000)
+    assert snapshot["state"] == "ok"
+    assert snapshot["active_values"] == {"min_path_spacing_m": 0.15, "max_history_points": 5000}
     cache.observe('{"accepted": -1}', 2_000_000_000)
     invalid = cache.snapshot(3.0, 2_000_000_000)
     assert invalid["state"] == "invalid"
@@ -580,11 +589,38 @@ def test_mapper_status_cache_is_bounded_and_keeps_last_valid_snapshot():
     assert cache.snapshot(3.0, 6_000_000_001)["state"] == "stale"
 
 
+@pytest.mark.parametrize("invalid_active_values", [
+    {"active_min_path_spacing_m": 0.1},
+    {"active_max_history_points": 5},
+    {"active_min_path_spacing_m": -0.1, "active_max_history_points": 5},
+    {"active_min_path_spacing_m": float("nan"), "active_max_history_points": 5},
+    {"active_min_path_spacing_m": 0.1, "active_max_history_points": -1},
+    {"active_min_path_spacing_m": 0.1, "active_max_history_points": 5.0},
+])
+def test_mapper_status_cache_rejects_invalid_or_partial_active_values(invalid_active_values):
+    cache = MapperStatusCache()
+    baseline = {"accepted": 1, "received": 1, "path_poses": 1}
+    cache.observe(json.dumps(baseline), 1_000_000_000)
+
+    cache.observe(json.dumps({**baseline, **invalid_active_values}), 2_000_000_000)
+
+    snapshot = cache.snapshot(3.0, 2_000_000_000)
+    assert snapshot["state"] == "invalid"
+    assert snapshot["values"] == baseline
+    assert snapshot["active_values"] is None
+
+
 def test_dashboard_mapper_configuration_api_is_separate_and_safe():
     saved = []
     dashboard = DashboardServer(
         "127.0.0.1", 0, lambda: {"status": "ok", "video": []}, lambda: None,
-        mapper_config_provider=lambda: {"values": {"min_path_spacing_m": 0.15, "max_history_points": 5000}, "status": {"state": "unavailable"}},
+        mapper_config_provider=lambda: {
+            "values": {"min_path_spacing_m": 0.15, "max_history_points": 5000},
+            "requested_values": {"min_path_spacing_m": 0.15, "max_history_points": 5000},
+            "active_values": {"min_path_spacing_m": 0.15, "max_history_points": 5000},
+            "pending_restart": False,
+            "status": {"state": "ok", "values": {"frame_context_received": 4, "frame_context_published": 3, "frame_context_rejected": 1, "frame_context_unavailable": 0}},
+        },
         mapper_config_saver=lambda values, restart: saved.append((values, restart)) or {"status": "saved", "restarting": restart},
     )
     dashboard.start()
@@ -602,6 +638,10 @@ def test_dashboard_mapper_configuration_api_is_separate_and_safe():
         page = urlopen(f"{base}/", timeout=2).read().decode()
         assert "Map &amp; Path" in page
         assert "map_metadata_path" not in page
+        assert "mapperDraftDirty" in page
+        assert "Active path" in page
+        assert "Pending override" in page
+        assert "frame_context_received" in page
     finally:
         dashboard.close()
 
