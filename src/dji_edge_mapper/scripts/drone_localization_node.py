@@ -42,6 +42,17 @@ def compass_to_ros_yaw(heading_deg):
     return math.atan2(math.sin(angle), math.cos(angle))
 
 
+def resolve_mapper_asset(configured):
+    path = Path(configured)
+    if path.is_absolute():
+        return path
+    package_path = Path(get_package_share_directory("dji_edge_mapper")) / path
+    if package_path.exists():
+        return package_path
+    workspace_path = Path("/workspace/src/dji_edge_mapper") / path
+    return workspace_path if workspace_path.exists() else package_path
+
+
 class DroneLocalizationNode(Node):
     def __init__(self):
         super().__init__("drone_localization_node")
@@ -124,9 +135,7 @@ class DroneLocalizationNode(Node):
         return point
 
     def _load_map_metadata(self, configured):
-        path = Path(configured)
-        if not path.is_absolute():
-            path = Path(get_package_share_directory("dji_edge_mapper")) / configured
+        path = resolve_mapper_asset(configured)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             values = tuple(
@@ -153,9 +162,10 @@ class DroneLocalizationNode(Node):
         if point is None:
             self.counts["rejected_projection"] += 1
             return
-        header_stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
-        stamp_ns = message.edge_receive_mono_ns or header_stamp_ns
-        if self.jump_gate and self.last_point is not None and self.last_stamp_ns is not None:
+        # Edge receive monotonic time is only a local jump-gate diagnostic. ROS
+        # delivery headers never substitute for Android/DJI source timing.
+        stamp_ns = message.edge_receive_mono_ns
+        if self.jump_gate and stamp_ns and self.last_point is not None and self.last_stamp_ns is not None:
             dt = max(0.0, (stamp_ns - self.last_stamp_ns) / 1e9)
             distance = math.dist(point, self.last_point)
             if dt == 0.0 or distance > self.tolerance + self.max_speed_mps * min(dt, self.max_gate_dt_s):
@@ -187,7 +197,7 @@ class DroneLocalizationNode(Node):
                 self.path.poses.pop(0)
             self.path.header.stamp = pose.header.stamp
             self.path_pub.publish(self.path)
-        self.last_point, self.last_stamp_ns = point, stamp_ns
+        self.last_point, self.last_stamp_ns = point, stamp_ns or None
         self.counts["accepted"] += 1
         self.counts["accepted_rtk" if message.rtk_valid else "accepted_gps_fallback"] += 1
 

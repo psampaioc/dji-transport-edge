@@ -1,5 +1,5 @@
-# One normalized, map-ready navigation sample. Field validity and source timing
-# make RTK/GPS fallback and asynchronous gimbal association explicit.
+# One normalized, map-ready navigation sample. Header is ROS delivery
+# bookkeeping only; Android/DJI fields below remain the origin-time evidence.
 std_msgs/Header header
 
 float64 latitude_deg

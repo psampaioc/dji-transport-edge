@@ -16,7 +16,7 @@ def generate_launch_description():
     mapper_config = LaunchConfiguration("mapper_config_file")
     rviz = LaunchConfiguration("rviz")
     preview_windows = LaunchConfiguration("preview_windows")
-    local_mapper_config = mapper_share / "config" / "mapper.local.yaml"
+    local_mapper_config = Path("/workspace/src/dji_edge_mapper/config/mapper.local.yaml")
     local_driver_config = Path("/workspace/bridge.local.yaml")
     default_mapper_config = local_mapper_config if local_mapper_config.exists() else mapper_share / "config" / "mapper.yaml"
     default_driver_config = local_driver_config if local_driver_config.exists() else driver_share / "config" / "bridge.yaml"

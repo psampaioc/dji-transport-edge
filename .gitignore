@@ -37,7 +37,6 @@ src/dji_edge_mapper/config/map_vis.pcd
 src/dji_edge_mapper/config/map_metadata.json
 
 # AI-agent and local-tool state
-AGENTS.md
 .Codex/
 .codex/
 .memsearch/

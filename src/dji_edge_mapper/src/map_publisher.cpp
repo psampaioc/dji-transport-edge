@@ -2,6 +2,32 @@
 #include <pcl/io/pcd_io.h>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
+#include <filesystem>
+
+namespace
+{
+
+std::string resolveMapperAsset(const std::string& configured_path)
+{
+  if (configured_path.empty() || configured_path.front() == '/') {
+    return configured_path;
+  }
+
+  const auto package_path = std::filesystem::path(
+    ament_index_cpp::get_package_share_directory("dji_edge_mapper")) / configured_path;
+  if (std::filesystem::exists(package_path)) {
+    return package_path.string();
+  }
+
+  const auto workspace_path = std::filesystem::path("/workspace/src/dji_edge_mapper") / configured_path;
+  if (std::filesystem::exists(workspace_path)) {
+    return workspace_path.string();
+  }
+  return package_path.string();
+}
+
+}  // namespace
+
 namespace dji_edge_mapper
 {
 
@@ -25,11 +51,8 @@ MapPublisher::MapPublisher(const rclcpp::NodeOptions& options) : Node("map_publi
     return;
   }
 
-  // Resolve package-relative path
-  if (!pcd_file_path_.empty() && pcd_file_path_[0] != '/') {
-    std::string pkg_share = ament_index_cpp::get_package_share_directory("dji_edge_mapper");
-    pcd_file_path_ = pkg_share + "/" + pcd_file_path_;
-  }
+  // Public assets resolve from the installed package. Ignored map assets remain source-local.
+  pcd_file_path_ = resolveMapperAsset(pcd_file_path_);
 
   RCLCPP_INFO(this->get_logger(), "Loading map from: %s", pcd_file_path_.c_str());
   RCLCPP_INFO(this->get_logger(), "Publishing on topic: %s (frame: %s)", topic_name_.c_str(), map_frame_.c_str());

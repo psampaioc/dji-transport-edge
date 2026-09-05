@@ -128,6 +128,7 @@ For each issue, in the stated order:
 ### Dependencies and Risks
 
 - #3 depends on Android continuing to emit AU identity and Android monotonic timing; Android source-timestamp semantics remain evidence-gated.
+- The delivered Edge contract keeps Android/DJI source timestamps separate from ROS delivery headers and Edge observations. Any future detection or map consumer must pair an image with `FrameContext`; it must not infer source timing from `Header.stamp`.
 - #1 depends on #3 publishing the frame-synchronous pose/context it must show, while retaining a headless launch mode for test environments.
 - #2 depends on the finalized set of safe runtime controls after #1; its restart design must avoid duplicate processes and never expose transport ports or arbitrary shell/filesystem actions.
 - Any hardware absence is not permission to simulate success. It leaves the final integrated test pending rather than blocking safe code/test work.

@@ -16,9 +16,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 
 from dji_edge_transport_core.clock import ClockMapper
-from dji_edge_transport_core.dashboard import DashboardServer
+from dji_edge_transport_core.dashboard import start_optional_dashboard
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
-from dji_edge_transport_core.local_config import atomic_write, validate
+from dji_edge_transport_core.local_config import resolve_ipv4_udp_target, save_requested_config
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import CLOCK_TYPES, FRAME_TYPES, ProtocolError, decode_json_packet, parse_rtp_packet
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
@@ -275,10 +275,22 @@ class EdgeBridge(Node):
         if not self.parameter("dashboard_enabled"):
             return None
         host = self.parameter("dashboard_host")
-        dashboard = DashboardServer(host, self.parameter("dashboard_port"), self.dashboard_state, self.stop_requested.set, self.dashboard_config, self.save_dashboard_config)
-        dashboard.start()
-        self.get_logger().info(f"dashboard=http://{host}:{dashboard.port}/")
+        dashboard = start_optional_dashboard(
+            host,
+            self.parameter("dashboard_port"),
+            self.dashboard_state,
+            self.stop_requested.set,
+            self.dashboard_config,
+            self.save_dashboard_config,
+            on_error=lambda error: self._record_dashboard_error(host, error),
+        )
+        if dashboard is not None:
+            self.get_logger().info(f"dashboard=http://{host}:{dashboard.port}/")
         return dashboard
+
+    def _record_dashboard_error(self, host, error):
+        self.endpoint_errors["dashboard"] = str(error)
+        self.get_logger().error(f"dashboard unavailable at http://{host}:{self.parameter('dashboard_port')}/: {error}")
 
     def dashboard_config(self):
         addresses = set()
@@ -299,16 +311,13 @@ class EdgeBridge(Node):
         }
 
     def save_dashboard_config(self, values, restart):
-        values = validate(values)
-        target = atomic_write(self.parameter("local_config_path"), values)
-        result = {"status": "saved", "source": str(target), "restarting": False}
-        if restart:
-            marker = Path(self.parameter("restart_request_path"))
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text("dashboard restart requested\n", encoding="utf-8")
-            result["status"], result["restarting"] = "saved; restarting managed stack", True
-            self.stop_requested.set()
-        return result
+        return save_requested_config(
+            values,
+            self.parameter("local_config_path"),
+            self.parameter("restart_request_path"),
+            restart=restart,
+            request_stop=self.stop_requested.set,
+        )
 
     def ingest(self, category, data, remote, edge_receive_ns, response_socket):
         try:
@@ -367,7 +376,8 @@ class EdgeBridge(Node):
                 self.clock_sequence += 1
                 payload = {"v": 1, "type": "clock_ping", "session": "edge-clock", "stream": "clock", "seq": self.clock_sequence, "t0_edge_send_mono_ns": time.monotonic_ns()}
                 try:
-                    clock_socket.sendto(json.dumps(payload, separators=(",", ":")).encode(), (self.clock_host, self.clock_port))
+                    target = resolve_ipv4_udp_target(self.clock_host, self.clock_port)
+                    clock_socket.sendto(json.dumps(payload, separators=(",", ":")).encode(), target)
                 except OSError as error:
                     self.endpoint_errors["clock_pinger"] = str(error)
 

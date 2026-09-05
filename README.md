@@ -22,16 +22,16 @@ The Android wire contract is [docs/PROTOCOL_V1.md](docs/PROTOCOL_V1.md). Do not 
 
 ## Map privacy and local configuration
 
-The public repository contains no point cloud and no geographic calibration. The real point cloud and its calibration remain local and ignored by Git.
+The public repository and installed ROS package contain no point cloud or geographic calibration. The real point cloud and its calibration remain local and ignored by Git; they are never copied by the mapper package install rule.
 
-This checkout already has `src/dji_edge_mapper/config/mapper.local.yaml`, which selects the private `map_vis.pcd` and `map_metadata.json`. The complete launch automatically prefers that ignored local configuration when it exists. A public clone starts the mapper disabled until its operator creates their own map:
+This checkout has an ignored `src/dji_edge_mapper/config/mapper.local.yaml`, which selects the private `map_vis.pcd` and `map_metadata.json`. In the Humble container, complete bringup explicitly prefers that source-workspace file when it exists. Relative `config/...` asset paths in it resolve from `/workspace/src/dji_edge_mapper` after the package checks its public installed assets. A public clone starts the mapper disabled until its operator creates their own map:
 
 ```bash
 cd src/dji_edge_mapper/config
 cp mapper.local.yaml.example mapper.local.yaml
 ```
 
-Then provide `map_vis.pcd`, `map_metadata.json`, and the correct projection/calibration in the ignored `mapper.local.yaml`. Without these files, the driver and dashboard still run, but no map, pose, path, or TF is published.
+Then provide `map_vis.pcd`, `map_metadata.json`, and the correct projection/calibration beside the ignored `mapper.local.yaml`. Without these files, the driver and dashboard still run, but no map, pose, path, or TF is published.
 
 ## Start and stop
 
@@ -93,6 +93,10 @@ The driver publishes the following direct-ingress topics:
 
 The mapper consumes navigation plus Primary frame context and publishes `/map/cloud`, the continuous `/dji/navigation/pose` and `/dji/navigation/path`, the frame-synchronous `/dji/frame/pose`, `/dji/navigation/status`, and `/tf`.
 
+### Timing contract
+
+For georeferencing a displayed video frame, consume its matching `FrameContext` alongside the image topic. `android_au_first_byte_mono_ns`, `android_au_complete_mono_ns`, and an optional documented DJI source timestamp are immutable Android/DJI-origin evidence. `std_msgs/Header.stamp`, `edge_receive_mono_ns`, and `edge_decoded_mono_ns` are ROS/Edge delivery observations only: they support RViz, local diagnostics, and latency measurement, but never replace source time or select frame navigation. The mapper's jump gate uses Edge receive monotonic time only when it is present; it never falls back to a ROS header timestamp.
+
 ## Configuration
 
 The committed defaults are in [bridge.yaml](src/dji_edge_driver/config/bridge.yaml).
@@ -102,7 +106,9 @@ The committed defaults are in [bridge.yaml](src/dji_edge_driver/config/bridge.ya
 - `preview_windows: true` starts Primary and FPV GStreamer windows.
 - `capture_rtp: false` is the normal setting. NDJSON evidence is always on.
 
-The dashboard writes only `android_clock_host`, `capture_rtp`, and `preview_windows` to the ignored `/workspace/bridge.local.yaml`. It shows the local Ubuntu IPv4 addresses to copy into the tablet and never exposes ports, paths, shell commands, or flight controls. **Save** persists for the next launch; **Save and restart** persists then restarts the managed Edge stack once.
+The dashboard writes only `android_clock_host`, `capture_rtp`, and `preview_windows` to the ignored `/workspace/bridge.local.yaml`. The clock target accepts an IPv4 literal or hostname resolved through IPv4 UDP; IPv6 is deliberately rejected because the Android clock contract is IPv4. It shows the local Ubuntu IPv4 addresses to copy into the tablet and never exposes ports, paths, shell commands, or flight controls. **Save** persists for the next launch; **Save and restart** persists then requests exactly one managed stack relaunch only after its marker is written successfully. Filesystem errors are returned to the dashboard without stopping the running stack.
+
+The dashboard is an optional loopback observer. If `127.0.0.1:8090` is already occupied, the terminal records the collision and direct UDP/RTP, ROS, evidence, mapper, and clean shutdown continue normally; the stack never chooses another port silently.
 
 You can also create the same local configuration manually:
 
@@ -124,7 +130,7 @@ The normal package launcher automatically prefers this ignored file when it exis
 
 ## Verification status
 
-The Dockerized full bringup has been smoke-tested without the tablet: it builds `dji_edge_driver` and `dji_edge_mapper`, publishes the static map, starts the localizer and dashboard, and Exit shuts the whole process tree down cleanly.
+The Dockerized full bringup has been smoke-tested without the tablet: it builds `dji_edge_driver` and `dji_edge_mapper`; with local map assets present it publishes the static map and starts the localizer; with only public defaults the mapper is intentionally disabled. The dashboard starts when its port is free, and its port-collision path has a separate headless smoke proof. Exit shuts the whole process tree down cleanly.
 
 A synthetic H.264/RTP Primary source was also received directly on UDP `5600`, decoded at `1280x720` and approximately `30 FPS`, and published as ROS images. Its old-frame counter increased under the synthetic producer, which proves the ROS handoff replaces stale frames instead of accumulating a queue.
 

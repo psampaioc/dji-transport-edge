@@ -1,13 +1,17 @@
 import json
+from pathlib import Path
+import socket
 import struct
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
 
 from dji_edge_transport_core.clock import ClockMapper
-from dji_edge_transport_core.dashboard import DashboardServer
+from dji_edge_transport_core.dashboard import DashboardServer, start_optional_dashboard
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
-from dji_edge_transport_core.local_config import atomic_write, validate
+from dji_edge_transport_core import local_config
+from dji_edge_transport_core.local_config import atomic_write, resolve_ipv4_udp_target, save_requested_config, validate
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet, video_au_identity
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
@@ -245,6 +249,22 @@ def test_temporal_correlation_interpolates_frame_navigation_and_heading_wrap():
     assert context["gimbal_pitch_deg"] == pytest.approx(-30.0)
 
 
+def test_temporal_correlation_ignores_edge_delivery_observations():
+    correlation = TemporalCorrelation(max_samples=4, max_gap_ns=1_000)
+    correlation.start_session("s")
+    correlation.add_telemetry("flight", {"android_mono_ns": 100, "edge_receive_mono_ns": 9_000_000, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.0}, "aircraft.longitude_deg": {"value": -9.0},
+        "aircraft.altitude_m": {"value": 10.0}, "heading_deg": {"value": 350.0},
+    }}})
+    correlation.add_telemetry("flight", {"android_mono_ns": 300, "edge_receive_mono_ns": 1, "data": {"fields": {
+        "aircraft.latitude_deg": {"value": 38.2}, "aircraft.longitude_deg": {"value": -8.8},
+        "aircraft.altitude_m": {"value": 14.0}, "heading_deg": {"value": 10.0},
+    }}})
+    context = correlation.associate_android_time(200)
+    assert context["latitude_deg"] == pytest.approx(38.1)
+    assert context["heading_deg"] == pytest.approx(0.0)
+
+
 def test_temporal_correlation_prefers_relevant_rtk_and_fails_closed_when_stale():
     correlation = TemporalCorrelation(max_samples=4, max_gap_ns=100)
     correlation.start_session("s")
@@ -333,6 +353,48 @@ def test_dashboard_configuration_api_calls_only_validated_saver():
         dashboard.close()
 
 
+def test_dashboard_rejects_non_boolean_restart_flag():
+    saved = []
+    dashboard = DashboardServer(
+        "127.0.0.1", 0, lambda: {"status": "ok", "video": []}, lambda: None,
+        lambda: {"values": {"android_clock_host": "", "capture_rtp": False, "preview_windows": True}},
+        lambda values, restart: saved.append((values, restart)) or {"status": "saved", "restarting": restart},
+    )
+    dashboard.start()
+    try:
+        request = Request(
+            f"http://127.0.0.1:{dashboard.port}/v1/config",
+            data=json.dumps({"values": {"android_clock_host": "192.168.1.151", "capture_rtp": True, "preview_windows": False}, "restart": "false"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with pytest.raises(HTTPError) as raised:
+            urlopen(request, timeout=2)
+        assert raised.value.code == 400
+        assert saved == []
+    finally:
+        dashboard.close()
+
+
+def test_dashboard_rejects_a_non_object_configuration_request():
+    dashboard = DashboardServer(
+        "127.0.0.1", 0, lambda: {"status": "ok", "video": []}, lambda: None,
+        lambda: {"values": {"android_clock_host": "", "capture_rtp": False, "preview_windows": True}},
+        lambda values, restart: {"status": "saved", "restarting": restart},
+    )
+    dashboard.start()
+    try:
+        request = Request(
+            f"http://127.0.0.1:{dashboard.port}/v1/config",
+            data=b"[]", headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with pytest.raises(HTTPError) as raised:
+            urlopen(request, timeout=2)
+        assert raised.value.code == 400
+        assert "object" in json.loads(raised.value.read())["error"]
+    finally:
+        dashboard.close()
+
+
 def test_local_dashboard_config_validates_and_writes_atomically(tmp_path):
     target = tmp_path / "bridge.local.yaml"
     values = {"android_clock_host": "192.168.1.151", "capture_rtp": True, "preview_windows": False}
@@ -342,6 +404,99 @@ def test_local_dashboard_config_validates_and_writes_atomically(tmp_path):
     with pytest.raises(ValueError):
         atomic_write(target, {"android_clock_host": "bad host!", "capture_rtp": True, "preview_windows": False})
     assert target.read_text() == before
+
+
+def test_local_dashboard_config_rejects_ipv6_but_accepts_ipv4_and_hostname():
+    base = {"capture_rtp": False, "preview_windows": True}
+    assert validate({**base, "android_clock_host": "192.168.1.151"})["android_clock_host"] == "192.168.1.151"
+    assert validate({**base, "android_clock_host": "tablet.local"})["android_clock_host"] == "tablet.local"
+    with pytest.raises(ValueError, match="IPv4"):
+        validate({**base, "android_clock_host": "2001:db8::1"})
+
+
+def test_clock_target_resolution_is_explicitly_ipv4(monkeypatch):
+    calls = []
+
+    def resolve(host, port, *, family, type):
+        calls.append((host, port, family, type))
+        return [(family, type, 17, "", ("192.168.1.151", port))]
+
+    monkeypatch.setattr(local_config.socket, "getaddrinfo", resolve)
+    assert resolve_ipv4_udp_target("tablet.local", 5502) == ("192.168.1.151", 5502)
+    assert calls == [("tablet.local", 5502, local_config.socket.AF_INET, local_config.socket.SOCK_DGRAM)]
+
+
+def test_atomic_config_write_failure_keeps_existing_file(tmp_path, monkeypatch):
+    target = tmp_path / "bridge.local.yaml"
+    target.write_text("known-good\n", encoding="utf-8")
+    monkeypatch.setattr(local_config.os, "replace", lambda *_: (_ for _ in ()).throw(OSError("disk full")))
+
+    with pytest.raises(OSError, match="disk full"):
+        atomic_write(target, {"android_clock_host": "192.168.1.151", "capture_rtp": True, "preview_windows": False})
+    assert target.read_text(encoding="utf-8") == "known-good\n"
+
+
+def test_restart_marker_failure_does_not_request_driver_stop(tmp_path, monkeypatch):
+    target = tmp_path / "bridge.local.yaml"
+    marker = tmp_path / "restart.request"
+    stopped = []
+    original_write_text = Path.write_text
+
+    def fail_marker(path, *args, **kwargs):
+        if path == marker:
+            raise OSError("marker volume is read-only")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_marker)
+    with pytest.raises(OSError, match="restart was not requested"):
+        save_requested_config(
+            {"android_clock_host": "192.168.1.151", "capture_rtp": True, "preview_windows": False},
+            target,
+            marker,
+            restart=True,
+            request_stop=lambda: stopped.append(True),
+        )
+    assert stopped == []
+    assert 'android_clock_host: "192.168.1.151"' in target.read_text(encoding="utf-8")
+
+
+def test_dashboard_returns_http_error_when_config_saver_has_filesystem_failure():
+    def fail_save(_values, _restart):
+        raise OSError("disk full")
+
+    dashboard = DashboardServer(
+        "127.0.0.1", 0, lambda: {"status": "ok", "video": []}, lambda: None,
+        lambda: {"values": {"android_clock_host": "", "capture_rtp": False, "preview_windows": True}},
+        fail_save,
+    )
+    dashboard.start()
+    try:
+        request = Request(
+            f"http://127.0.0.1:{dashboard.port}/v1/config",
+            data=json.dumps({"values": {"android_clock_host": "192.168.1.151", "capture_rtp": True, "preview_windows": False}, "restart": False}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with pytest.raises(HTTPError) as raised:
+            urlopen(request, timeout=2)
+        assert raised.value.code == 500
+        assert "disk full" in json.loads(raised.value.read())["error"]
+    finally:
+        dashboard.close()
+
+
+def test_busy_dashboard_port_is_reported_without_raising():
+    reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    reservation.bind(("127.0.0.1", 0))
+    errors = []
+    try:
+        dashboard = start_optional_dashboard(
+            "127.0.0.1", reservation.getsockname()[1], lambda: {"status": "ok"}, lambda: None,
+            on_error=lambda error: errors.append(str(error)),
+        )
+        assert dashboard is None
+        assert errors
+    finally:
+        reservation.close()
 
 
 @pytest.mark.parametrize("values", [

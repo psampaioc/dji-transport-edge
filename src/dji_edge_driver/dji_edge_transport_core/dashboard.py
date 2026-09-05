@@ -42,9 +42,16 @@ class DashboardServer:
                     try:
                         length = int(self.headers.get("Content-Length", "0"))
                         body = json.loads(self.rfile.read(length).decode("utf-8"))
-                        payload = parent._config_saver(body.get("values"), bool(body.get("restart")))
+                        if not isinstance(body, dict):
+                            raise ValueError("configuration request must be a JSON object")
+                        restart = body.get("restart")
+                        if not isinstance(restart, bool):
+                            raise ValueError("restart must be boolean")
+                        payload = parent._config_saver(body.get("values"), restart)
                     except (TypeError, ValueError, json.JSONDecodeError) as error:
                         self._json({"error": str(error)}, 400); return
+                    except OSError as error:
+                        self._json({"error": str(error)}, 500); return
                     self._json(payload, 202 if payload.get("restarting") else 200); return
                 if self.path != "/v1/exit": self.send_error(404); return
                 parent._stop_callback(); self._json({"stopping": True})
@@ -61,3 +68,23 @@ class DashboardServer:
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=2)
+
+
+def start_optional_dashboard(
+    host: str,
+    port: int,
+    state_provider: Callable[[], dict[str, Any]],
+    stop_callback: Callable[[], None],
+    config_provider: Callable[[], dict[str, Any]] | None = None,
+    config_saver: Callable[[dict[str, Any], bool], dict[str, Any]] | None = None,
+    *,
+    on_error: Callable[[OSError], None],
+) -> DashboardServer | None:
+    """Start the optional local observer without making transport depend on it."""
+    try:
+        dashboard = DashboardServer(host, port, state_provider, stop_callback, config_provider, config_saver)
+        dashboard.start()
+        return dashboard
+    except OSError as error:
+        on_error(error)
+        return None

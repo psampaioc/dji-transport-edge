@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -o pipefail
 
-workspace=/workspace
+workspace=${DJI_EDGE_WORKSPACE:-/workspace}
 source /opt/ros/humble/setup.bash
 cd "$workspace"
 if [ ! -f "$workspace/install/setup.bash" ]; then

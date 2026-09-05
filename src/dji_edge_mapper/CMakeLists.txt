@@ -31,8 +31,17 @@ ament_target_dependencies(map_publisher
 install(TARGETS map_publisher DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 install(PROGRAMS scripts/drone_localization_node.py DESTINATION lib/${PROJECT_NAME})
-install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
+install(FILES
+  config/mapper.yaml
+  config/mapper.local.yaml.example
+  DESTINATION share/${PROJECT_NAME}/config
+)
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch)
 install(DIRECTORY rviz/ DESTINATION share/${PROJECT_NAME}/rviz)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_public_install_layout test/test_public_install_layout.py)
+endif()
 
 ament_package()

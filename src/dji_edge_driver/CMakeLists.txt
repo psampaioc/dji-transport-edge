@@ -19,6 +19,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_transport_core test/test_transport_core.py)
   ament_add_pytest_test(test_gstreamer_pts test/test_gstreamer_pts.py)
   ament_add_pytest_test(test_bringup_launch test/test_bringup_launch.py)
+  ament_add_pytest_test(test_dji_edge_bringup_supervisor test/test_dji_edge_bringup_supervisor.py)
 endif()
 
 install(PROGRAMS
