@@ -2,12 +2,14 @@ import json
 from pathlib import Path
 import socket
 import struct
+import threading
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
 
 from dji_edge_transport_core.clock import ClockMapper
+from dji_edge_transport_core.clock_client import ClockPinger
 from dji_edge_transport_core.dashboard import DashboardServer, start_optional_dashboard
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
 from dji_edge_transport_core import local_config
@@ -21,7 +23,7 @@ from dji_edge_transport_core.mapper_status import MapperStatusCache
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet, video_au_identity
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
-from dji_edge_transport_core.state import LatestState, SequenceTracker
+from dji_edge_transport_core.state import IngressMetrics, LatestState, SequenceTracker
 from dji_edge_transport_core.synchronization import TemporalCorrelation
 from dji_edge_transport_core.video import LatestFrameBuffer, RtpPtsBinding
 
@@ -88,6 +90,91 @@ def test_clock_and_rtp_contract_reject_invalid_data():
     assert parse_rtp_packet(rtp, 96).marker
     with pytest.raises(ProtocolError):
         parse_rtp_packet(rtp, 97)
+
+
+def test_clock_pinger_receives_android_reply_on_its_ephemeral_source_socket():
+    """Android replies to the source endpoint of a clock_ping, not UDP 5502."""
+    responder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    responder.bind(("127.0.0.1", 0))
+    received = {}
+
+    def reply_once():
+        request, remote = responder.recvfrom(1201)
+        ping = json.loads(request)
+        received["remote"] = remote
+        responder.sendto(json.dumps({
+            "v": 1, "type": "clock_pong", "session": ping["session"],
+            "stream": ping["stream"], "seq": ping["seq"],
+            "t0_edge_send_mono_ns": ping["t0_edge_send_mono_ns"],
+            "t1_android_rx_mono_ns": 100, "t2_android_tx_mono_ns": 101,
+        }, separators=(",", ":")).encode(), remote)
+
+    thread = threading.Thread(target=reply_once)
+    thread.start()
+    responder_port = responder.getsockname()[1]
+    try:
+        pinger = ClockPinger(timeout_s=1.0)
+        try:
+            exchange = pinger.exchange_once(
+                ("127.0.0.1", responder_port), "edge-clock", 7,
+            )
+        finally:
+            pinger.close()
+    finally:
+        thread.join(timeout=2)
+        responder.close()
+
+    response = json.loads(exchange.response_data)
+    assert received["remote"][1] != responder_port
+    assert exchange.remote[0] == "127.0.0.1"
+    assert response["type"] == "clock_pong"
+    assert response["seq"] == 7
+    assert exchange.t3_edge_receive_mono_ns > exchange.t0_edge_send_mono_ns
+    assert response["t0_edge_send_mono_ns"] == exchange.t0_edge_send_mono_ns
+
+
+def test_clock_pinger_reuses_its_source_socket_and_ignores_a_late_pong():
+    """A delayed Android pong must not poison the next clock exchange."""
+    responder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    responder.bind(("127.0.0.1", 0))
+    remotes = []
+
+    def pong(ping):
+        return json.dumps({
+            "v": 1, "type": "clock_pong", "session": ping["session"],
+            "stream": ping["stream"], "seq": ping["seq"],
+            "t0_edge_send_mono_ns": ping["t0_edge_send_mono_ns"],
+            "t1_android_rx_mono_ns": 100, "t2_android_tx_mono_ns": 101,
+        }, separators=(",", ":")).encode()
+
+    def reply_late_then_current():
+        first_raw, first_remote = responder.recvfrom(1201)
+        remotes.append(first_remote)
+        second_raw, second_remote = responder.recvfrom(1201)
+        remotes.append(second_remote)
+        responder.sendto(pong(json.loads(first_raw)), second_remote)
+        responder.sendto(pong(json.loads(second_raw)), second_remote)
+
+    thread = threading.Thread(target=reply_late_then_current, daemon=True)
+    thread.start()
+    responder_port = responder.getsockname()[1]
+    try:
+        pinger = ClockPinger(timeout_s=0.05)
+        try:
+            with pytest.raises(socket.timeout):
+                pinger.exchange_once(("127.0.0.1", responder_port), "edge-clock", 1)
+            exchange = pinger.exchange_once(
+                ("127.0.0.1", responder_port), "edge-clock", 2,
+                lambda candidate: json.loads(candidate.response_data)["seq"] == 2,
+            )
+        finally:
+            pinger.close()
+    finally:
+        thread.join(timeout=2)
+        responder.close()
+
+    assert remotes[0] == remotes[1]
+    assert json.loads(exchange.response_data)["seq"] == 2
 
 
 def test_evidence_writer_drains_ndjson_and_reports_write_health(tmp_path):
@@ -170,6 +257,29 @@ def test_rtp_bitrate_uses_the_bounded_recent_measurement_window():
     assert snapshot["estimated_fps"] == pytest.approx(1.0)
     # The metric accounts for the complete RTP datagram: 12-byte header + 1 byte payload.
     assert snapshot["estimated_bitrate_bps"] == pytest.approx(120 * 13 * 8 / 119)
+
+
+def test_rtp_metrics_exposes_observed_datagram_age_even_when_packet_is_rejected():
+    metrics = RtpMetrics(expected_payload_type=96)
+    assert metrics.observe(b"invalid", receive_mono_ns=100) is None
+
+    snapshot = metrics.snapshot(now_mono_ns=2_100_000_100)
+    assert snapshot["datagrams_observed"] == 1
+    assert snapshot["packets_received"] == 0
+    assert snapshot["packets_rejected"] == 1
+    assert snapshot["last_datagram_age_s"] == pytest.approx(2.1)
+
+
+def test_ingress_metrics_keeps_post_network_received_valid_and_rejected_facts_separate():
+    metrics = IngressMetrics(("telemetry", "frame_metadata"))
+    metrics.observe("telemetry", 100)
+    metrics.accept("telemetry")
+    metrics.observe("frame_metadata", 200)
+    metrics.reject("frame_metadata")
+
+    snapshot = metrics.snapshot(now_mono_ns=1_000_000_200)
+    assert snapshot["telemetry"] == {"datagrams_received": 1, "packets_valid": 1, "packets_rejected": 0, "last_datagram_age_s": pytest.approx(1.0)}
+    assert snapshot["frame_metadata"] == {"datagrams_received": 1, "packets_valid": 0, "packets_rejected": 1, "last_datagram_age_s": pytest.approx(1.0)}
 
 
 def test_raw_rtp_capture_uses_length_prefixed_records_and_is_opt_in(tmp_path):
@@ -334,6 +444,8 @@ def test_dashboard_serves_state_health_and_clean_exit_callback():
         page = urlopen(f"{base}/", timeout=2).read().decode()
         assert "DJI Transport Edge" in page
         assert "Configuration and raw diagnostics" in page
+        assert "Android ingress" in page
+        assert "waiting for Android" in page
         request = Request(f"{base}/v1/exit", method="POST")
         assert json.loads(urlopen(request, timeout=2).read()) == {"stopping": True}
         assert exits == [True]

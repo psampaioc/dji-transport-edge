@@ -24,6 +24,9 @@ _PAGE = """<!doctype html>
     .tabs { display: flex; gap: 8px; margin: 18px 0; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 22px 0; }
     .streams { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+    .ingress { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 0 0 14px; }
+    .ingress .card { padding: 12px 14px; }
+    .ingress .value { font-size: 15px; }
     .card, .stream, details { background: #121a27; border: 1px solid #253044; border-radius: 12px; padding: 16px; }
     .label { font-size: 12px; color: #91a0b7; text-transform: uppercase; letter-spacing: .07em; }
     .value { font-size: 20px; margin-top: 6px; overflow-wrap: anywhere; }
@@ -61,6 +64,7 @@ _PAGE = """<!doctype html>
 
     <section id="transportPanel">
       <section class="grid" id="summary"><div class="card">Loading…</div></section>
+      <section class="ingress" id="ingress" aria-label="Android ingress"></section>
       <section class="streams" id="streams"></section>
       <section class="card" id="transportConfig">
         <div class="label">Local runtime configuration</div>
@@ -94,6 +98,7 @@ _PAGE = """<!doctype html>
     const valueOrDash = (value) => value ?? "—";
     const formatFps = (value) => value == null ? "—" : `${Number(value).toFixed(1)} FPS`;
     const formatBitrate = (value) => value == null ? "—" : `${(Number(value) / 1e6).toFixed(2)} Mbps`;
+    const formatAge = (value) => value == null ? "never" : value < 1 ? "just now" : `${Number(value).toFixed(1)} s ago`;
     const card = (label, value, style = "") => `<div class="card"><div class="label">${label}</div><div class="value ${style}">${value}</div></div>`;
 
     function streamCard(video) {
@@ -112,6 +117,17 @@ _PAGE = """<!doctype html>
       </dl></article>`;
     }
 
+    function ingressCard(label, boundary) {
+      if (!boundary) return "";
+      const received = Number(boundary.datagrams_received || 0);
+      const valid = Number(boundary.packets_valid || 0);
+      const rejected = Number(boundary.packets_rejected || 0);
+      const waiting = received === 0;
+      const status = waiting ? "waiting for Android" : `${valid} valid · ${rejected} rejected`;
+      const style = waiting || rejected ? "warn" : "good";
+      return `<article class="card"><div class="label">${label}</div><div class="value ${style}">${status}</div><div class="muted">last datagram: ${formatAge(boundary.last_datagram_age_s)}</div></article>`;
+    }
+
     async function refreshTransport() {
       try {
         const state = await (await fetch("/v1/state")).json();
@@ -119,14 +135,22 @@ _PAGE = """<!doctype html>
         const transport = state.transport || {};
         q("#summary").innerHTML =
           card("Driver state", state.status, state.status === "ok" ? "good" : "warn") +
-          card("Clock", clock.ready ? "ready" : "not configured", clock.ready ? "good" : "warn") +
+          card("Clock", clock.ready ? "ready" : state.configuration?.android_clock_host ? "waiting for tablet" : "not configured", clock.ready ? "good" : "warn") +
           card("Accepted / rejected", `${valueOrDash(transport.accepted_packets)} / ${valueOrDash(transport.rejected_packets)}`) +
           card("Evidence session", `<span title="${valueOrDash(state.evidence?.path)}">${valueOrDash(state.evidence?.path)}</span>`);
         q("#streams").innerHTML = (state.video || []).map(streamCard).join("");
+        const ingress = state.ingress || {};
+        q("#ingress").innerHTML = [
+          ingressCard("Telemetry", ingress.telemetry),
+          ingressCard("Frame metadata", ingress.frame_metadata),
+          ingressCard("Primary video", ingress.primary),
+          ingressCard("FPV video", ingress.fpv),
+        ].join("");
         q("#raw").textContent = JSON.stringify({
           configuration: state.configuration,
           android_pre_network: state.android_pre_network,
           edge_post_network: state.edge_post_network,
+          ingress: state.ingress,
           navigation: state.navigation,
           udp_errors: state.udp_errors,
         }, null, 2);

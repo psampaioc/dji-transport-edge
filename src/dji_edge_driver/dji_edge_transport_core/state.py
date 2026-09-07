@@ -52,6 +52,40 @@ class SequenceTracker:
             return SequenceResult("gap" if gap else "ok", gap)
 
 
+class IngressMetrics:
+    """Small post-network counters for existing JSON datagram boundaries."""
+
+    def __init__(self, categories: tuple[str, ...]) -> None:
+        self._lock = Lock()
+        self._values = {
+            category: {"datagrams_received": 0, "packets_valid": 0, "packets_rejected": 0, "last_datagram_mono_ns": None}
+            for category in categories
+        }
+
+    def observe(self, category: str, receive_mono_ns: int) -> None:
+        with self._lock:
+            value = self._values[category]
+            value["datagrams_received"] += 1
+            value["last_datagram_mono_ns"] = receive_mono_ns
+
+    def accept(self, category: str) -> None:
+        with self._lock:
+            self._values[category]["packets_valid"] += 1
+
+    def reject(self, category: str) -> None:
+        with self._lock:
+            self._values[category]["packets_rejected"] += 1
+
+    def snapshot(self, now_mono_ns: int | None = None) -> dict[str, dict[str, int | float | None]]:
+        now = time.monotonic_ns() if now_mono_ns is None else now_mono_ns
+        with self._lock:
+            values = deepcopy(self._values)
+        for value in values.values():
+            received = value.pop("last_datagram_mono_ns")
+            value["last_datagram_age_s"] = None if received is None else max(0.0, (now - received) / 1_000_000_000)
+        return values
+
+
 class LatestState:
     """Thread-safe latest complete Android state, independent of ROS."""
 

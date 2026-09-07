@@ -39,6 +39,15 @@ def test_localizer_never_uses_ros_delivery_header_as_a_timing_fallback():
     assert "stamp_ns = message.edge_receive_mono_ns" in localizer
 
 
+def test_rviz_uses_a_capped_repaint_rate_while_preserving_operator_displays():
+    rviz = (PACKAGE_ROOT / "rviz" / "dji_edge_mapper.rviz").read_text(encoding="utf-8")
+
+    assert "Frame Rate: 15" in rviz
+    assert "Value: /map/cloud" in rviz
+    assert "Value: /dji/navigation/path" in rviz
+    assert "Value: /dji/primary/image_raw" in rviz
+
+
 def test_mapper_runtime_overlay_is_last_and_only_used_when_it_exists(tmp_path, monkeypatch):
     launch_path = PACKAGE_ROOT / "launch" / "dji_edge_mapper.launch.py"
     spec = importlib.util.spec_from_file_location("dji_edge_mapper_launch", launch_path)

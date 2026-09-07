@@ -1,8 +1,8 @@
 # Matrice transport protocol v1
 
-## Minimal telemetry form
+## Compact telemetry form
 
-The canonical Android wire form is one compact `data.fields` datagram per callback. The Edge accepts old fragmented packets during migration, but Android must not fragment these minimal samples.
+The canonical Android wire form is one compact `data.fields` datagram per callback. It is the current Android implementation, not a proposed richer schema. The Edge must accept it without requiring fragmentation, `sample_sequence`, `component_index`, or per-field source metadata.
 
 Each datagram contains:
 
@@ -15,14 +15,10 @@ Each datagram contains:
   "seq": 42,
   "rx_mono_ns": 752340000000,
   "data": {
-    "sample_sequence": 8,
-    "component_index": 0,
     "fields": {
       "aircraft.latitude_deg": {
         "value": 38.0,
-        "valid": true,
-        "source": "flight",
-        "component_index": 0
+        "valid": true
       }
     }
   }
@@ -33,9 +29,8 @@ Rules:
 
 - maximum datagram size defaults to 1200 bytes;
 - `seq` is monotonic per `(session,type,stream)` datagram;
-- `sample_sequence` identifies one native DJI callback;
 - field names carry units as suffixes, such as `_deg`, `_m`, `_m_s` and `_ns`;
-- every field carries explicit validity and source/component identity;
+- field validity is carried when the Android source provides it; the telemetry type and stream identify the producer;
 - `rx_mono_ns` is Android `elapsedRealtimeNanos()` callback arrival time.
 
 Only these telemetry fields belong in the transport contract:
@@ -45,6 +40,8 @@ Only these telemetry fields belong in the transport contract:
 - `gimbal`: `attitude.pitch_deg`.
 
 `health` and `video_au` stay compact diagnostic packets. Battery, parser dumps, raw video bytes, and unrelated DJI telemetry do not belong in normal transport packets.
+
+The compact Android `health` payload contains only sender-side counters: Primary/Secondary callback and callback-drop counts, emitted RTP packets and access units per feed, telemetry queue drops, telemetry socket errors, video socket errors, and compact callback rates. It is pre-network evidence; it does not replace Edge packet, AU, gap, FPS, or latency metrics.
 
 ## Canonical video feeds
 
@@ -70,8 +67,18 @@ Edge receive, decode, and ROS-delivery times are separate diagnostic
 observations. They may measure transport latency but are never frame identity,
 camera time, or a telemetry correlation key.
 
-## Clock packets
+## UDP ports and clock packets
+
+| UDP port | Direction | Payload |
+| --- | --- | --- |
+| `5500` | Android → Edge | compact telemetry and health JSON |
+| `5501` | Android → Edge | `video_au` JSON metadata |
+| `5502` | bidirectional | clock request/reply JSON |
+| `5600` | Android → Edge | Primary H.264/RTP, PT `96` |
+| `5610` | Android → Edge | FPV H.264/RTP, PT `96` |
 
 `clock_ping` requires positive `t0_edge_send_mono_ns`. `clock_pong` additionally requires positive `t1_android_rx_mono_ns` and `t2_android_tx_mono_ns >= t1_android_rx_mono_ns`.
+
+For an Edge-initiated exchange, the Edge sends `clock_ping` to the tablet UDP `5502` from a temporary IPv4 source port. Android replies to that exact source IP and port. The Edge receives that response on the same temporary socket, then records `t3_edge_receive_mono_ns` locally. The fixed Edge UDP `5502` listener is reserved for an Android-initiated `clock_ping`; it is not the return path for an Edge-initiated exchange.
 
 Clock mapping estimates Android-minus-edge monotonic offset. It does not manufacture camera exposure time or a DJI source timestamp.

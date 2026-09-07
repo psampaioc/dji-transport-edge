@@ -17,6 +17,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 from dji_edge_transport_core.clock import ClockMapper
+from dji_edge_transport_core.clock_client import ClockPinger
 from dji_edge_transport_core.dashboard import start_optional_dashboard
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
 from dji_edge_transport_core.local_config import resolve_ipv4_udp_target, save_requested_config
@@ -27,7 +28,7 @@ from dji_edge_transport_core.mapper_status import MapperStatusCache
 from dji_edge_transport_core.navigation import build_navigation
 from dji_edge_transport_core.protocol import CLOCK_TYPES, FRAME_TYPES, ProtocolError, decode_json_packet, parse_rtp_packet
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
-from dji_edge_transport_core.state import LatestState, SequenceTracker
+from dji_edge_transport_core.state import IngressMetrics, LatestState, SequenceTracker
 from dji_edge_transport_core.video import LatestFrameBuffer, RtpPtsBinding
 
 
@@ -37,7 +38,7 @@ PARAMETERS = {
     "max_json_bytes": 1200, "rtp_payload_type": 96, "rtp_latency_ms": 20,
     "preview_windows": True, "publish_video": True, "capture_rtp": False,
     "evidence_dir": "evidence", "android_clock_host": "", "android_clock_port": 5502,
-    "clock_ping_interval_s": 1.0, "dashboard_enabled": True,
+    "clock_ping_interval_s": 1.0, "clock_response_timeout_s": 0.5, "dashboard_enabled": True,
     "dashboard_host": "127.0.0.1", "dashboard_port": 8090,
     "primary_topic": "/dji/primary/image_raw", "fpv_topic": "/dji/fpv/image_raw",
     "primary_context_topic": "/dji/primary/frame_context", "fpv_context_topic": "/dji/fpv/frame_context",
@@ -130,7 +131,7 @@ class VideoFeed:
         return (
             f"udpsrc name={self.name}_source address={self.node.bind_host} port={port} buffer-size=4194304 "
             "caps=application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,"
-            f"payload={self.node.rtp_payload_type} ! rtpjitterbuffer name={self.name}_jitter latency={self.node.rtp_latency_ms} "
+            f"payload={self.node.rtp_payload_type} ! rtpjitterbuffer name={self.name}_jitter mode=none latency={self.node.rtp_latency_ms} "
             "drop-on-latency=true do-lost=true ! rtph264depay wait-for-keyframe=true request-keyframe=true ! "
             f"h264parse config-interval=-1 ! avdec_h264 ! videoconvert ! video/x-raw,format=BGR ! tee name={self.name}_decoded "
             f"{self.name}_decoded. ! queue leaky=downstream max-size-buffers=1 ! "
@@ -243,6 +244,7 @@ class EdgeBridge(Node):
         self.clock_mapper = ClockMapper()
         self.latest_state = LatestState(self.clock_mapper)
         self.sequences = SequenceTracker()
+        self.ingress = IngressMetrics(("telemetry", "frame_metadata", "clock"))
         self.accepted = self.rejected = self.clock_pongs = self.clock_sequence = 0
         self.endpoint_errors = {}
         self.mapper_status = MapperStatusCache()
@@ -266,6 +268,7 @@ class EdgeBridge(Node):
         self.clock_host = self.parameter("android_clock_host")
         self.clock_port = self.parameter("android_clock_port")
         self.clock_interval = self.parameter("clock_ping_interval_s")
+        self.clock_pinger = ClockPinger(self.parameter("clock_response_timeout_s"), self.max_json_bytes)
         self.clock_thread = threading.Thread(target=self._clock_loop, daemon=True)
         self.clock_thread.start()
         self.stop_requested = threading.Event()
@@ -367,6 +370,7 @@ class EdgeBridge(Node):
         )
 
     def ingest(self, category, data, remote, edge_receive_ns, response_socket):
+        self.ingress.observe(category, edge_receive_ns)
         try:
             packet = decode_json_packet(data, expected_version=1, max_bytes=self.max_json_bytes)
             if category == "telemetry" and packet.packet_type in FRAME_TYPES | CLOCK_TYPES:
@@ -376,11 +380,12 @@ class EdgeBridge(Node):
             if category == "clock" and packet.packet_type not in CLOCK_TYPES:
                 raise ProtocolError(f"{packet.packet_type} is not a clock packet")
         except ProtocolError as error:
-            self._reject(data, remote, edge_receive_ns, str(error))
+            self._reject(category, data, remote, edge_receive_ns, str(error))
             return
         if category == "clock":
             self._ingest_clock(packet, remote, edge_receive_ns, response_socket)
             return
+        self.ingress.accept(category)
         sequence = self.sequences.observe((packet.session, packet.packet_type, packet.stream), packet.sequence)
         self.latest_state.update_packet(packet, edge_receive_ns, remote, sequence)
         if not sequence.is_newest:
@@ -396,8 +401,9 @@ class EdgeBridge(Node):
         if packet.packet_type in {"flight", "rtk", "gimbal"}:
             self.publish_navigation()
 
-    def _reject(self, data, remote, edge_receive_ns, error):
+    def _reject(self, category, data, remote, edge_receive_ns, error):
         self.rejected += 1
+        self.ingress.reject(category)
         self.latest_state.reject()
         self.evidence.write("protocol_errors", {"edge_receive_mono_ns": edge_receive_ns, "remote": f"{remote[0]}:{remote[1]}", "error": error, "raw": data.decode("utf-8", errors="replace")})
 
@@ -407,26 +413,44 @@ class EdgeBridge(Node):
             if packet.packet_type == "clock_ping":
                 response = {"v": 1, "type": "clock_pong", "session": packet.session, "stream": packet.stream, "seq": packet.sequence, "t0_edge_send_mono_ns": raw["t0_edge_send_mono_ns"], "t1_android_rx_mono_ns": edge_receive_ns, "t2_android_tx_mono_ns": time.monotonic_ns()}
                 response_socket.sendto(json.dumps(response, separators=(",", ":")).encode(), remote)
+                self.ingress.accept("clock")
                 return
-            t0, t1, t2 = (int(raw[name]) for name in ("t0_edge_send_mono_ns", "t1_android_rx_mono_ns", "t2_android_tx_mono_ns"))
-            sample = self.clock_mapper.add_exchange(t0, t1, t2, edge_receive_ns)
-            self.clock_pongs += 1
-            self.evidence.write("clock", {**sample.as_dict(), "estimate": self.clock_mapper.estimate(), "remote": f"{remote[0]}:{remote[1]}"})
+            self._record_clock_pong(raw, remote, edge_receive_ns)
+            self.ingress.accept("clock")
         except (KeyError, TypeError, ValueError) as error:
-            self._reject(b"", remote, edge_receive_ns, f"invalid clock pong: {error}")
+            self._reject("clock", b"", remote, edge_receive_ns, f"invalid clock pong: {error}")
+
+    def _record_clock_pong(self, raw, remote, edge_receive_ns):
+        t0, t1, t2 = (int(raw[name]) for name in ("t0_edge_send_mono_ns", "t1_android_rx_mono_ns", "t2_android_tx_mono_ns"))
+        sample = self.clock_mapper.add_exchange(t0, t1, t2, edge_receive_ns)
+        self.clock_pongs += 1
+        self.evidence.write("clock", {**sample.as_dict(), "estimate": self.clock_mapper.estimate(), "remote": f"{remote[0]}:{remote[1]}"})
 
     def _clock_loop(self):
         if not self.clock_host:
             return
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as clock_socket:
-            while not self.clock_stop.wait(self.clock_interval):
-                self.clock_sequence += 1
-                payload = {"v": 1, "type": "clock_ping", "session": "edge-clock", "stream": "clock", "seq": self.clock_sequence, "t0_edge_send_mono_ns": time.monotonic_ns()}
-                try:
-                    target = resolve_ipv4_udp_target(self.clock_host, self.clock_port)
-                    clock_socket.sendto(json.dumps(payload, separators=(",", ":")).encode(), target)
-                except OSError as error:
-                    self.endpoint_errors["clock_pinger"] = str(error)
+        while not self.clock_stop.wait(self.clock_interval):
+            self.clock_sequence += 1
+            try:
+                target = resolve_ipv4_udp_target(self.clock_host, self.clock_port)
+                def matches_ping(exchange):
+                    try:
+                        response = decode_json_packet(exchange.response_data, expected_version=1, max_bytes=self.max_json_bytes)
+                    except ProtocolError:
+                        return False
+                    return (
+                        response.packet_type == "clock_pong" and response.session == "edge-clock"
+                        and response.stream == "clock" and response.sequence == self.clock_sequence
+                        and response.raw.get("t0_edge_send_mono_ns") == exchange.t0_edge_send_mono_ns
+                        and exchange.remote[0] == target[0]
+                    )
+
+                exchange = self.clock_pinger.exchange_once(target, "edge-clock", self.clock_sequence, matches_ping)
+                response = decode_json_packet(exchange.response_data, expected_version=1, max_bytes=self.max_json_bytes)
+                self._record_clock_pong(response.raw, exchange.remote, exchange.t3_edge_receive_mono_ns)
+                self.endpoint_errors.pop("clock_pinger", None)
+            except (OSError, ProtocolError, ValueError) as error:
+                self.endpoint_errors["clock_pinger"] = str(error)
 
     def publish_navigation(self):
         navigation = build_navigation(self.latest_state.snapshot())
@@ -458,7 +482,7 @@ class EdgeBridge(Node):
         message.session, message.frame_seq = identity["session"], identity["frame_seq"]
         message.rtp_ssrc, message.rtp_ts = identity["rtp_ssrc"], identity["rtp_ts"]
         message.android_au_first_byte_mono_ns = identity["android_first_byte_mono_ns"]
-        message.android_au_complete_rx_mono_ns = identity["android_complete_mono_ns"]
+        message.android_au_complete_mono_ns = identity["android_complete_mono_ns"]
         message.has_dji_source_timestamp = identity["dji_source_timestamp_ns"] is not None
         message.dji_source_timestamp_ns = identity["dji_source_timestamp_ns"] or 0
         message.dji_timestamp_source = identity["dji_timestamp_source"] or ""
@@ -485,7 +509,7 @@ class EdgeBridge(Node):
             "rtp_ssrc": message.rtp_ssrc, "rtp_ts": message.rtp_ts,
             "source_time": {
                 "android_au_first_byte_mono_ns": message.android_au_first_byte_mono_ns,
-                "android_au_complete_rx_mono_ns": message.android_au_complete_rx_mono_ns,
+                "android_au_complete_mono_ns": message.android_au_complete_mono_ns,
                 "dji_source_timestamp_ns": message.dji_source_timestamp_ns if message.has_dji_source_timestamp else None,
                 "dji_timestamp_source": message.dji_timestamp_source if message.has_dji_source_timestamp else None,
             },
@@ -516,6 +540,7 @@ class EdgeBridge(Node):
             metrics = video.metrics.snapshot()
             binding = video._pts_binding.snapshot()
             status.values.extend([KeyValue(key=f"{video.name}.decoded_frames", value=str(video.decoded_frames)), KeyValue(key=f"{video.name}.published_frames", value=str(video.published_frames)), KeyValue(key=f"{video.name}.dropped_old_frames", value=str(video.dropped_frames)), KeyValue(key=f"{video.name}.context_published", value=str(video.context_published)), KeyValue(key=f"{video.name}.context_unavailable", value=str(video.context_unavailable)), KeyValue(key=f"{video.name}.pts_binding_missing", value=str(binding["missing"])), KeyValue(key=f"{video.name}.resolution", value=f"{video.width}x{video.height}"), KeyValue(key=f"{video.name}.error", value=video.error or ""), KeyValue(key=f"{video.name}.rtp_packets", value=str(metrics["packets_received"])), KeyValue(key=f"{video.name}.rtp_gaps", value=str(metrics["sequence_gaps"])), KeyValue(key=f"{video.name}.fps", value=str(metrics["estimated_fps"]))])
+        self.evidence.write("transport", {"edge_observation": {"ingress": self.ingress_snapshot()}})
         diagnostics = DiagnosticArray()
         diagnostics.header.stamp = self.get_clock().now().to_msg()
         diagnostics.status = [status]
@@ -525,6 +550,7 @@ class EdgeBridge(Node):
     def dashboard_state(self):
         evidence = self.evidence.health()
         videos = [{"name": video.name, "decoded_frames": video.decoded_frames, "published_frames": video.published_frames, "dropped_old_frames": video.dropped_frames, "context": {"published": video.context_published, "unavailable": video.context_unavailable, "pts_binding": video._pts_binding.snapshot()}, "resolution": {"width": video.width, "height": video.height}, "error": video.error, "rtp": video.metrics.snapshot(), "capture_rtp": video.capture.enabled} for video in self.videos]
+        ingress = self.ingress_snapshot()
         state = self.latest_state.snapshot()
         return {
             "schema_version": 1,
@@ -543,7 +569,8 @@ class EdgeBridge(Node):
                 "mapper_status_topic": self.parameter("mapper_status_topic"),
             },
             "android_pre_network": state["health"],
-            "edge_post_network": {"transport": state["transport"], "video": videos},
+            "edge_post_network": {"transport": state["transport"], "ingress": ingress, "video": videos},
+            "ingress": ingress,
             "transport": state["transport"],
             "navigation": build_navigation(state),
             "mapper": self.mapper_dashboard_config(),
@@ -551,9 +578,22 @@ class EdgeBridge(Node):
             "udp_errors": self.endpoint_errors,
         }
 
+    def ingress_snapshot(self):
+        ingress = self.ingress.snapshot()
+        for video in self.videos:
+            rtp = video.metrics.snapshot()
+            ingress[video.name] = {
+                "datagrams_received": rtp["datagrams_observed"],
+                "packets_valid": rtp["packets_received"],
+                "packets_rejected": rtp["packets_rejected"],
+                "last_datagram_age_s": rtp["last_datagram_age_s"],
+            }
+        return ingress
+
     def destroy_node(self):
         self.clock_stop.set()
         self.clock_thread.join(timeout=2)
+        self.clock_pinger.close()
         if self.dashboard is not None:
             self.dashboard.close()
         for endpoint in self.inputs:

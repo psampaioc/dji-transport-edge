@@ -157,7 +157,7 @@ Visualization Manager:
   Global Options:
     Background Color: 32; 34; 38
     Fixed Frame: map
-    Frame Rate: 30
+    Frame Rate: 15
   Name: root
   Tools:
     - Class: rviz_default_plugins/Interact

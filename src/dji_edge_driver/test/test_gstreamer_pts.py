@@ -16,15 +16,20 @@ Gst.init(None)
 
 
 pytestmark = pytest.mark.skipif(
-    Gst.ElementFactory.find("x264enc") is None,
-    reason="container lacks x264enc; characterize against props-off RTP evidence instead",
+    Gst.ElementFactory.find("x264enc") is None and Gst.ElementFactory.find("openh264enc") is None,
+    reason="container lacks an H.264 encoder; characterize against props-off RTP evidence instead",
 )
 
 
 def _collect_encoded_rtp():
+    encoder = (
+        "x264enc tune=zerolatency speed-preset=ultrafast key-int-max=6"
+        if Gst.ElementFactory.find("x264enc") is not None
+        else "videoconvert ! video/x-raw,format=I420 ! openh264enc gop-size=6"
+    )
     pipeline = Gst.parse_launch(
         "videotestsrc num-buffers=12 ! video/x-raw,framerate=30/1 ! "
-        "x264enc tune=zerolatency speed-preset=ultrafast key-int-max=6 ! "
+        f"{encoder} ! "
         "rtph264pay pt=96 config-interval=1 ! appsink name=sink sync=false"
     )
     sink = pipeline.get_by_name("sink")
@@ -47,7 +52,7 @@ def test_post_jitter_rtp_pts_reaches_decoded_h264_access_unit():
     pipeline = Gst.parse_launch(
         "appsrc name=source is-live=false format=time "
         "caps=application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=96 ! "
-        "rtpjitterbuffer name=jitter latency=0 drop-on-latency=true ! rtph264depay ! h264parse ! "
+        "rtpjitterbuffer name=jitter mode=none latency=0 drop-on-latency=true ! rtph264depay ! h264parse ! "
         "avdec_h264 ! videoconvert ! video/x-raw,format=BGR ! appsink name=sink sync=false"
     )
     source, jitter, sink = (pipeline.get_by_name(name) for name in ("source", "jitter", "sink"))
@@ -57,7 +62,7 @@ def test_post_jitter_rtp_pts_reaches_decoded_h264_access_unit():
         buffer = info.get_buffer()
         if buffer is not None and buffer.pts != Gst.CLOCK_TIME_NONE:
             packet = parse_rtp_packet(buffer.extract_dup(0, buffer.get_size()), 96)
-            post_jitter[(packet.ssrc, packet.timestamp)] = int(buffer.pts)
+            post_jitter.setdefault(int(buffer.pts), set()).add((packet.ssrc, packet.timestamp))
         return Gst.PadProbeReturn.OK
 
     jitter.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, observe)
@@ -85,4 +90,6 @@ def test_post_jitter_rtp_pts_reaches_decoded_h264_access_unit():
         pipeline.set_state(Gst.State.NULL)
     assert post_jitter, "rtpjitterbuffer did not provide usable internal PTS"
     assert decoded_pts, "decoder did not emit a usable internal PTS"
-    assert set(decoded_pts) & set(post_jitter.values()), "decoder PTS did not match post-jitter RTP PTS"
+    matching = [pts for pts in decoded_pts if pts in post_jitter]
+    assert matching, "decoder PTS did not match post-jitter RTP PTS"
+    assert all(len(post_jitter[pts]) == 1 for pts in matching), "a decoded PTS mapped to multiple RTP access units"

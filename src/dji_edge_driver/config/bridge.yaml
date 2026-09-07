@@ -17,6 +17,7 @@
     android_clock_host: ""
     android_clock_port: 5502
     clock_ping_interval_s: 1.0
+    clock_response_timeout_s: 0.5
     dashboard_enabled: true
     dashboard_host: "127.0.0.1"
     dashboard_port: 8090

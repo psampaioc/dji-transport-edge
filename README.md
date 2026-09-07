@@ -102,7 +102,8 @@ For georeferencing a displayed video frame, consume its matching `FrameContext` 
 The committed defaults are in [bridge.yaml](src/dji_edge_driver/config/bridge.yaml).
 
 - `bind_host: "0.0.0.0"` listens on every local Ubuntu interface; it is not the tablet IP.
-- `android_clock_host` is empty by default. Set it to the tablet IP only when its clock responder is enabled; traffic still works without it, but transport age is then unavailable.
+- `android_clock_host` is empty by default. Set it to the tablet IPv4 only when its clock responder is enabled; traffic still works without it, but cross-device transport-age estimates are unavailable. Each probe uses a short-lived Edge UDP source port and receives the tablet reply on that same socket; this is required by the Android responder contract.
+- `clock_ping_interval_s: 1.0` and `clock_response_timeout_s: 0.5` keep clock probing bounded. A missing tablet response becomes a visible `clock_pinger` diagnostic and never queues or delays video/telemetry ingress.
 - `preview_windows: true` starts Primary and FPV GStreamer windows.
 - `capture_rtp: false` is the normal setting. NDJSON evidence is always on.
 
@@ -136,7 +137,7 @@ The Dockerized full bringup has been smoke-tested without the tablet: it builds 
 
 A synthetic H.264/RTP Primary source was also received directly on UDP `5600`, decoded at `1280x720` and approximately `30 FPS`, and published as ROS images. Its old-frame counter increased under the synthetic producer, which proves the ROS handoff replaces stale frames instead of accumulating a queue.
 
-This does not replace a props-off tablet/drone bench: that bench must verify actual Android ingress, Primary quality/latency, the first failing FPV boundary, GPS/RTK selection, and gimbal pitch.
+This does not replace a props-off tablet/drone bench: that bench must verify actual Android ingress, Primary quality/latency, the first failing FPV boundary, GPS/RTK selection, gimbal pitch, and at least one successful clock exchange (`clock.ready: true` with `sample_count > 0`).
 
 The source-time association code has deterministic unit coverage. Its fully synthetic H.264/RTP GStreamer characterization is skipped in the current Humble image because it intentionally has no `x264enc` fixture encoder; the actual props-off bench remains the required proof that Android RTP timestamps map to decoded frames for both feeds.
 
@@ -160,7 +161,7 @@ Run this once after the tablet is connected to the Cendence/drone with props off
 2. In the dashboard, verify the shown Ubuntu IPv4 address; use that address in the tablet transport screen. Confirm `capture_rtp` is off unless this is a short packet-diagnostic capture.
 3. Enable Android transport. On dashboard/RViz verify Primary RTP bytes, decoded frames, ROS frames and Primary image growth. RViz must show the cyan navigation path and yellow `/dji/frame/pose` marker separately. A context counter marked unavailable is honest evidence of an AU/telemetry association failure, not a position estimate.
 4. Select FPV in the tablet. Verify the native FPV window, `/dji/fpv/image_raw`, FPV RTP/AU counters and FPV frame-context counters independently. If Android callbacks grow while Edge FPV RTP stays zero, record that as Android emission failure; do not call it an Edge decode pass.
-5. Observe navigation source. RTK is preferred when `is_being_used` is valid; otherwise the path must continue as GPS fallback with aircraft-relative altitude. Verify gimbal pitch validity in `FrameContext`/evidence.
+5. Observe navigation source. RTK is preferred when `is_being_used` is valid; otherwise the path must continue as GPS fallback with aircraft-relative altitude. Verify gimbal pitch validity in `FrameContext`/evidence. In the dashboard, verify clock `ready: true`, `sample_count > 0`, and a bounded `best_rtt_ns`; this measures tablet-to-Edge transport timing only and does not alter Android/DJI source timestamps.
 6. In **Map & Path**, choose a spacing and either a finite history or **Keep full route**. Use **Save and restart**, wait for dashboard/RViz to return once, then verify that the cyan billboard path continues to grow and the selected controls persist. Confirm the process list contains one driver/mapper/RViz stack. Use **Exit** afterward and confirm it does not restart.
 7. Run the 60-second bench command above. Retain its JSON and the dashboard evidence-session directory. Attach them to issues #1–#3 together with a note saying whether Primary, FPV, RTK, clock and frame contexts were actually observed.
 
