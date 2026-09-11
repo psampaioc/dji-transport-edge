@@ -9,7 +9,7 @@ from pathlib import Path
 import pyproj
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from dji_edge_driver.msg import FrameContext, NavigationState
+from dji_edge_transport.msg import FrameContext, NavigationState
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Path as PathMessage
 from rclpy.executors import ExternalShutdownException

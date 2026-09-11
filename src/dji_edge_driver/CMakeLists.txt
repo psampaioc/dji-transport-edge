@@ -12,7 +12,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES std_msgs
 )
 
-ament_python_install_package(dji_edge_transport_core)
+# The driver's Python implementation lives under the package's conventional
+# source directory.  Keep the import name stable for launch files and tests.
+ament_python_install_package(dji_edge_transport_core
+  PACKAGE_DIR src/dji_edge_transport_core
+)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
@@ -23,7 +27,7 @@ if(BUILD_TESTING)
 endif()
 
 install(PROGRAMS
-  scripts/dji_edge_driver_node.py
+  src/dji_edge_driver_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME dji_edge_driver
 )

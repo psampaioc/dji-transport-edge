@@ -55,7 +55,7 @@ source install/setup.bash
 ros2 run dji_edge_driver dji_edge_bringup
 ```
 
-The managed supervisor starts the driver, mapper, dashboard, both native GStreamer previews, and the preconfigured RViz view. It also consumes exactly one dashboard restart request before starting one replacement stack. RViz shows the Primary ROS image, the map, cyan continuous path, and yellow frame-synchronous pose. The terminal remains attached to the pipeline. `djiedge-run` is an optional host convenience command with the same build/source/managed-launch sequence.
+The managed supervisor starts the driver, mapper, dashboard, and the preconfigured RViz view. Native GStreamer preview windows are disabled by default: ROS topics are the normal image route. RViz opens with the map, cyan continuous path, and yellow frame-synchronous pose; enable its image displays when visual inspection is needed. The terminal remains attached to the pipeline. `djiedge-run` is an optional host convenience command with the same build/source/managed-launch sequence.
 
 For headless Docker checks or a machine without X11, keep the exact same transport/map bringup and disable only RViz:
 
@@ -77,12 +77,27 @@ djiedgeplus
 
 ## What the dashboard measures
 
-The dashboard is a local measurement/status surface, not a video renderer. Video appears in the GStreamer native windows and can be viewed in RViz from:
+The dashboard is a local measurement/status surface, not a video renderer. For visual inspection, enable the existing RViz image display; it subscribes to:
 
 - `/dji/primary/image_raw`
 - `/dji/fpv/image_raw`
 
-It reports post-network Edge evidence: accepted/rejected JSON packets, clock state, NDJSON writer health, RTP bytes/packets/gaps/duplicates, access units, estimated FPS/bitrate, decoded resolution and frame count. The Android `health` telemetry remains the separate pre-network source of callback, parser and sender metrics.
+It reports post-network Edge evidence: accepted/rejected JSON packets, clock state, NDJSON writer health, RTP bytes/packets/gaps/duplicates, access units, estimated FPS/bitrate, decoded resolution/frame count, and the selected H.264 decoder. The Android `health` telemetry remains the separate pre-network source of callback, parser and sender metrics.
+
+`Decoder` is truthful runtime state. `nvidia · nvh264dec` means the normal Humble container exposed the NVIDIA runtime, GStreamer registered the decoder, and that pipeline started. `cpu · avdec_h264` is the reliable fallback; its detail identifies whether GPU exposure, the plugin, or startup was unavailable. The current generic Humble image falls back to CPU until the container is configured with NVIDIA compute/video capability and a GStreamer NVDEC plugin.
+
+Each stream card also separates the two progress boundaries that matter when a
+window appears frozen: `Last RTP` is the age of the newest packet received by
+Edge, while `Last decoded` is the age of the newest H.264 frame produced by
+GStreamer. `primary_decode_stalled` means RTP is fresh but decoding stopped;
+the driver then replaces only the Primary feed after a bounded backoff. The
+restart clears only Edge-internal PTS binding and the one-frame handoff; it
+does not alter Android/DJI timestamps, telemetry history, map, or FPV. A
+GStreamer `ERROR`/`EOS` is shown as `primary_pipeline_error` (or the FPV
+equivalent). `fpv_not_emitted_by_android` means Android health reports FPV
+callbacks but Edge receives no UDP `5610`; this remains an Android-side
+emission issue. `clock_timeout` is independent and never stops video or
+navigation.
 
 ## ROS topic inventory
 
@@ -104,8 +119,13 @@ The committed defaults are in [bridge.yaml](src/dji_edge_driver/config/bridge.ya
 - `bind_host: "0.0.0.0"` listens on every local Ubuntu interface; it is not the tablet IP.
 - `android_clock_host` is empty by default. Set it to the tablet IPv4 only when its clock responder is enabled; traffic still works without it, but cross-device transport-age estimates are unavailable. Each probe uses a short-lived Edge UDP source port and receives the tablet reply on that same socket; this is required by the Android responder contract.
 - `clock_ping_interval_s: 1.0` and `clock_response_timeout_s: 0.5` keep clock probing bounded. A missing tablet response becomes a visible `clock_pinger` diagnostic and never queues or delays video/telemetry ingress.
-- `preview_windows: true` starts Primary and FPV GStreamer windows.
+- `preview_windows: false` is the normal setting. It creates one headless pipeline per feed ending at `appsink`, with no renderer or second output branch. Set it to `true` only for a short display diagnostic.
+- `publish_video: true` enables ROS image delivery. Setting it to `false` does not stop RTP ingress, decode health, diagnostics, or the independent Primary/FPV pipelines; it only avoids the final decoded-image copy when no ROS consumer is wanted.
 - `capture_rtp: false` is the normal setting. NDJSON evidence is always on.
+
+### NVIDIA decoder preflight
+
+The Edge driver probes `nvh264dec` inside the running container, not on the host. The normal `dji_edge_humble` service must therefore expose the NVIDIA GPU with compute and video capability, and its image must contain the GStreamer NVDEC plugin. Before claiming hardware decode, run `nvidia-smi` and `gst-inspect-1.0 nvh264dec` inside that exact container. If either fails, the driver selects `avdec_h264` and shows the precise reason in the dashboard/diagnostics.
 
 The dashboard Transport tab writes only `android_clock_host`, `capture_rtp`, and `preview_windows` to the ignored `/workspace/bridge.local.yaml`. The clock target accepts an IPv4 literal or hostname resolved through IPv4 UDP; IPv6 is deliberately rejected because the Android clock contract is IPv4. It shows the local Ubuntu IPv4 addresses to copy into the tablet and never exposes ports, paths, shell commands, or flight controls. **Save** persists for the next launch; **Save and restart** persists then requests exactly one managed stack relaunch only after its marker is written successfully. Filesystem errors are returned to the dashboard without stopping the running stack.
 
@@ -135,7 +155,7 @@ The normal package launcher automatically prefers this ignored file when it exis
 
 The Dockerized full bringup has been smoke-tested without the tablet: it builds `dji_edge_driver` and `dji_edge_mapper`; with local map assets present it publishes the static map and starts the localizer; with only public defaults the mapper is intentionally disabled. The dashboard starts when its port is free, and its port-collision path has a separate headless smoke proof. Exit shuts the whole process tree down cleanly.
 
-A synthetic H.264/RTP Primary source was also received directly on UDP `5600`, decoded at `1280x720` and approximately `30 FPS`, and published as ROS images. Its old-frame counter increased under the synthetic producer, which proves the ROS handoff replaces stale frames instead of accumulating a queue.
+A synthetic H.264/RTP Primary source was also received directly on UDP `5600`, decoded at `1280x720` and approximately `30 FPS`, and published as ROS images. Its old-frame counter increased under the synthetic producer, which proves the ROS handoff replaces stale frames instead of accumulating a queue. Hardware decode still requires the container preflight above.
 
 This does not replace a props-off tablet/drone bench: that bench must verify actual Android ingress, Primary quality/latency, the first failing FPV boundary, GPS/RTK selection, gimbal pitch, and at least one successful clock exchange (`clock.ready: true` with `sample_count > 0`).
 
@@ -153,14 +173,20 @@ python3 /workspace/src/dji_edge_driver/scripts/capture_transport_bench.py \
 
 The script only reads the local dashboard. The resulting JSON preserves each dashboard sample, including the exact evidence session path, pre-network Android health, post-network RTP/AU metrics, image publish/drop counters, clock state, navigation source, and both feeds. It does not capture raw RTP or issue any DJI command.
 
+The report's `.summary.videos[]` compares RTP packet delta with decoded-frame
+delta and includes the final feed status, RTP/decode ages, restart count and
+last GStreamer event. This is the minimum useful proof for a freeze: increasing
+RTP with a flat decoded count is a decoder/pipeline stall, not a healthy video
+display.
+
 ## Final integrated props-off acceptance
 
 Run this once after the tablet is connected to the Cendence/drone with props off.
 
-1. In a fresh terminal, run `source ~/.zshrc` then `djiedge-run`. It builds, opens the two native GStreamer previews and RViz, and serves the dashboard at `http://127.0.0.1:8090`.
+1. In a fresh terminal, run `source ~/.zshrc` then `djiedge-run`. It builds, opens RViz, and serves the dashboard at `http://127.0.0.1:8090`. No native GStreamer windows are expected by default.
 2. In the dashboard, verify the shown Ubuntu IPv4 address; use that address in the tablet transport screen. Confirm `capture_rtp` is off unless this is a short packet-diagnostic capture.
 3. Enable Android transport. On dashboard/RViz verify Primary RTP bytes, decoded frames, ROS frames and Primary image growth. RViz must show the cyan navigation path and yellow `/dji/frame/pose` marker separately. A context counter marked unavailable is honest evidence of an AU/telemetry association failure, not a position estimate.
-4. Select FPV in the tablet. Verify the native FPV window, `/dji/fpv/image_raw`, FPV RTP/AU counters and FPV frame-context counters independently. If Android callbacks grow while Edge FPV RTP stays zero, record that as Android emission failure; do not call it an Edge decode pass.
+4. Select FPV in the tablet. Verify `/dji/fpv/image_raw`, FPV RTP/AU counters and FPV frame-context counters independently. If Android callbacks grow while Edge FPV RTP stays zero, record that as Android emission failure; do not call it an Edge decode pass.
 5. Observe navigation source. RTK is preferred when `is_being_used` is valid; otherwise the path must continue as GPS fallback with aircraft-relative altitude. Verify gimbal pitch validity in `FrameContext`/evidence. In the dashboard, verify clock `ready: true`, `sample_count > 0`, and a bounded `best_rtt_ns`; this measures tablet-to-Edge transport timing only and does not alter Android/DJI source timestamps.
 6. In **Map & Path**, choose a spacing and either a finite history or **Keep full route**. Use **Save and restart**, wait for dashboard/RViz to return once, then verify that the cyan billboard path continues to grow and the selected controls persist. Confirm the process list contains one driver/mapper/RViz stack. Use **Exit** afterward and confirm it does not restart.
 7. Run the 60-second bench command above. Retain its JSON and the dashboard evidence-session directory. Attach them to issues #1–#3 together with a note saying whether Primary, FPV, RTK, clock and frame contexts were actually observed.

@@ -6,6 +6,11 @@ import math
 from typing import Any
 
 
+def triggers_navigation(packet_type: str) -> bool:
+    """Publish the map snapshot only from the bounded flight cadence."""
+    return packet_type == "flight"
+
+
 def _unwrap(fields: dict[str, Any], key: str, default: Any = None) -> Any:
     value = fields.get(key, default)
     return value.get("value", default) if isinstance(value, dict) else value

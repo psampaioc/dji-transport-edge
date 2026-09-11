@@ -113,7 +113,13 @@ _PAGE = """<!doctype html>
         <dt>Frame context</dt><dd>${valueOrDash(context.published)} published / ${valueOrDash(context.unavailable)} unavailable</dd>
         <dt>RTP gaps</dt><dd>${valueOrDash(rtp.sequence_gaps)}</dd>
         <dt>Raw RTP capture</dt><dd>${video.capture_rtp ? "on" : "off"}</dd>
-        <dt>Pipeline</dt><dd>${video.error || "running"}</dd>
+        <dt>Decoder</dt><dd>${video.decoder?.backend || "unknown"} · ${video.decoder?.element || "—"}</dd>
+        <dt>Decoder detail</dt><dd>${video.decoder?.reason || "—"}</dd>
+        <dt>Status</dt><dd class="${video.status === "running" ? "good" : "warn"}">${video.status || video.error || "running"}</dd>
+        <dt>Last RTP / decoded</dt><dd>${formatAge(rtp.last_datagram_age_s)} / ${formatAge(video.last_decoded_age_s)}</dd>
+        <dt>Restarts</dt><dd>${valueOrDash(video.restart_count)}</dd>
+        <dt>Last GStreamer event</dt><dd>${video.last_bus_message || video.error || "none"}</dd>
+        <dt>Last failure</dt><dd>${video.last_failure || "none"}</dd>
       </dl></article>`;
     }
 
@@ -150,6 +156,7 @@ _PAGE = """<!doctype html>
           configuration: state.configuration,
           android_pre_network: state.android_pre_network,
           edge_post_network: state.edge_post_network,
+          signals: state.signals,
           ingress: state.ingress,
           navigation: state.navigation,
           udp_errors: state.udp_errors,

@@ -15,7 +15,7 @@ def generate_launch_description():
     driver = Node(package="dji_edge_driver", executable="dji_edge_driver", name="dji_edge_driver", output="screen", parameters=[config, {"preview_windows": preview_windows}])
     return LaunchDescription([
         DeclareLaunchArgument("config_file", default_value=default_config),
-        DeclareLaunchArgument("preview_windows", default_value="true"),
+        DeclareLaunchArgument("preview_windows", default_value="false"),
         driver,
         RegisterEventHandler(OnProcessExit(target_action=driver, on_exit=[Shutdown(reason="driver stopped")])),
     ])

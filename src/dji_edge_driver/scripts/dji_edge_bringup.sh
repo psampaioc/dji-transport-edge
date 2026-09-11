@@ -3,6 +3,13 @@ set -o pipefail
 
 workspace=${DJI_EDGE_WORKSPACE:-/workspace}
 source /opt/ros/humble/setup.bash
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+  export XDG_RUNTIME_DIR="/tmp/dji-edge-runtime-$(id -u)"
+fi
+if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+  mkdir -p "$XDG_RUNTIME_DIR"
+  chmod 700 "$XDG_RUNTIME_DIR"
+fi
 cd "$workspace"
 if [ ! -f "$workspace/install/setup.bash" ]; then
   echo "Workspace is not built. Run: colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release" >&2

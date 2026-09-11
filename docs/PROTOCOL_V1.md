@@ -82,3 +82,23 @@ camera time, or a telemetry correlation key.
 For an Edge-initiated exchange, the Edge sends `clock_ping` to the tablet UDP `5502` from a temporary IPv4 source port. Android replies to that exact source IP and port. The Edge receives that response on the same temporary socket, then records `t3_edge_receive_mono_ns` locally. The fixed Edge UDP `5502` listener is reserved for an Android-initiated `clock_ping`; it is not the return path for an Edge-initiated exchange.
 
 Clock mapping estimates Android-minus-edge monotonic offset. It does not manufacture camera exposure time or a DJI source timestamp.
+
+## Edge-side video health
+
+The following are Edge observations, not additions to the Android wire
+contract. The driver keeps one GStreamer decoder per logical feed and a
+one-item newest-frame handoff. It records separate ages for the last RTP
+datagram and last decoded frame. When RTP remains fresh while decoded progress
+stops, the feed is marked stalled and may be recreated with bounded backoff;
+only that feed's internal pipeline, PTS binding and stale frame are reset.
+Telemetry, navigation history, the other feed and all Android/DJI source-time
+fields remain untouched. An intentional shutdown never triggers a restart.
+
+`primary_decode_stalled`, `primary_pipeline_error`,
+`fpv_not_emitted_by_android`, and `clock_timeout` are operator-facing diagnostic statuses. They locate the
+failure boundary and must not be interpreted as new packet types or as source
+timestamps.
+
+`primary_preview_renderer_suspect` and its FPV equivalent can appear only when the optional native preview is explicitly enabled for a short diagnostic; they are not part of the default headless route.
+
+The decoder backend and its selection reason are also Edge-only diagnostics. `nvidia` is reported only after the active container's GStreamer runtime starts the NVIDIA decoder pipeline; `cpu` means `avdec_h264` is active, with a concrete fallback reason. Neither value changes the Android RTP/H.264 contract or any source timestamp.

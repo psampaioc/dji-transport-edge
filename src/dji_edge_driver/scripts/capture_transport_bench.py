@@ -16,6 +16,36 @@ def read_state(url: str) -> dict:
         return json.load(response)
 
 
+def summarize_video_progress(states: list[dict], name: str) -> dict:
+    """Compare RTP and decoded progress instead of treating RTP as video proof."""
+    videos = []
+    for state in states:
+        videos.extend(video for video in state.get("video", []) if video.get("name") == name)
+    if not videos:
+        return {"name": name, "observed": False}
+    first, last = videos[0], videos[-1]
+    first_rtp = (first.get("rtp") or {}).get("packets_received", 0)
+    last_rtp = (last.get("rtp") or {}).get("packets_received", 0)
+    first_decoded = first.get("decoded_frames", 0)
+    last_decoded = last.get("decoded_frames", 0)
+    return {
+        "name": name,
+        "observed": True,
+        "rtp_packets_start": first_rtp,
+        "rtp_packets_end": last_rtp,
+        "decoded_frames_start": first_decoded,
+        "decoded_frames_end": last_decoded,
+        "rtp_packets_delta": last_rtp - first_rtp,
+        "decoded_frames_delta": last_decoded - first_decoded,
+        "last_rtp_age_s": (last.get("rtp") or {}).get("last_datagram_age_s"),
+        "last_decoded_age_s": last.get("last_decoded_age_s"),
+        "status": last.get("status"),
+        "restart_count": last.get("restart_count", 0),
+        "last_bus_message": last.get("last_bus_message"),
+        "decoder_progress_stalled": last_rtp > first_rtp and last_decoded == first_decoded,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration-s", type=float, default=60.0)
@@ -55,6 +85,10 @@ def main() -> None:
         "first_state": successful[0] if successful else None,
         "last_state": successful[-1] if successful else None,
         "association_summary": association_summary,
+        "summary": {
+            "successful_samples": len(successful),
+            "videos": [summarize_video_progress(successful, name) for name in ("primary", "fpv")],
+        },
         "samples": samples,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -36,7 +36,7 @@ class RtpMetrics:
         # separately, so they must not be divided by a short recent window.
         self._recent_access_units: deque[tuple[int, int]] = deque(maxlen=120)
 
-    def observe(self, data: bytes, receive_mono_ns: int | None = None) -> RtpPacket | None:
+    def observe(self, data: bytes | memoryview, receive_mono_ns: int | None = None) -> RtpPacket | None:
         received = time.monotonic_ns() if receive_mono_ns is None else receive_mono_ns
         with self._lock:
             self._datagrams_observed += 1
@@ -124,7 +124,7 @@ class RawRtpCapture:
     def enabled(self) -> bool:
         return self._stream is not None
 
-    def write(self, data: bytes) -> bool:
+    def write(self, data: bytes | memoryview) -> bool:
         with self._lock:
             if self._stream is None:
                 return False

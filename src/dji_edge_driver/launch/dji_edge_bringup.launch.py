@@ -27,7 +27,7 @@ def generate_launch_description():
         DeclareLaunchArgument("mapper_config_file", default_value=str(default_mapper_config)),
         DeclareLaunchArgument("mapper_runtime_config_file", default_value=str(local_mapper_runtime_config)),
         DeclareLaunchArgument("rviz", default_value="true"),
-        DeclareLaunchArgument("preview_windows", default_value="true"),
+        DeclareLaunchArgument("preview_windows", default_value="false"),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(driver_share / "launch" / "dji_edge_driver.launch.py")),
             launch_arguments={"config_file": driver_config, "preview_windows": preview_windows}.items(),

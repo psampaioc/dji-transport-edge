@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import stat
 import subprocess
 
 
@@ -64,3 +65,26 @@ def test_child_failure_without_request_preserves_exit_code(tmp_path):
     assert result.returncode == 7
     assert len(invocations) == 1
     assert not marker.exists()
+
+
+def test_supervisor_creates_private_xdg_runtime_directory_when_missing(tmp_path):
+    runtime_dir = tmp_path / "xdg-runtime"
+    environment = os.environ | {
+        "DJI_EDGE_WORKSPACE": str(tmp_path / "workspace"),
+        "XDG_RUNTIME_DIR": str(runtime_dir),
+    }
+    workspace = Path(environment["DJI_EDGE_WORKSPACE"])
+    (workspace / "install").mkdir(parents=True)
+    (workspace / "install" / "setup.bash").write_text("", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ros = fake_bin / "ros2"
+    fake_ros.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_ros.chmod(0o755)
+    environment["PATH"] = f"{fake_bin}:{os.environ['PATH']}"
+
+    result = subprocess.run(["bash", str(SCRIPT)], env=environment, text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0
+    assert runtime_dir.is_dir()
+    assert stat.S_IMODE(runtime_dir.stat().st_mode) == 0o700

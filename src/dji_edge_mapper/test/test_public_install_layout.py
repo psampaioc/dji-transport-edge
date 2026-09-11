@@ -13,15 +13,15 @@ def test_mapper_installs_only_public_configuration_assets():
     assert "config/mapper.local.yaml.example" in cmake
 
 
-def test_bringup_prefers_the_ignored_workspace_local_mapper_config():
+def test_new_bringup_uses_transport_and_never_references_legacy_driver():
     bringup = (
-        PACKAGE_ROOT.parents[0]
-        / "dji_edge_driver"
+        PACKAGE_ROOT
         / "launch"
         / "dji_edge_bringup.launch.py"
     ).read_text(encoding="utf-8")
 
-    assert "/workspace/src/dji_edge_mapper/config/mapper.local.yaml" in bringup
+    assert 'get_package_share_directory("dji_edge_transport")' in bringup
+    assert "dji_edge_driver" not in bringup
 
 
 def test_local_relative_map_assets_fall_back_to_the_workspace_source_tree():

@@ -25,18 +25,17 @@ from dji_edge_transport_core.mapper_config import DEFAULT_VALUES as MAPPER_DEFAU
 from dji_edge_transport_core.mapper_config import load as load_mapper_config
 from dji_edge_transport_core.mapper_config import save_requested_config as save_mapper_config
 from dji_edge_transport_core.mapper_status import MapperStatusCache
-from dji_edge_transport_core.navigation import build_navigation
-from dji_edge_transport_core.protocol import CLOCK_TYPES, FRAME_TYPES, ProtocolError, decode_json_packet, parse_rtp_packet
-from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
+from dji_edge_transport_core.navigation import build_navigation, triggers_navigation
+from dji_edge_transport_core.protocol import CLOCK_TYPES, FRAME_TYPES, ProtocolError, decode_json_packet
 from dji_edge_transport_core.state import IngressMetrics, LatestState, SequenceTracker
-from dji_edge_transport_core.video import LatestFrameBuffer, RtpPtsBinding
+from dji_edge_transport_core.feed_pipeline import FeedPipeline
 
 
 PARAMETERS = {
     "bind_host": "0.0.0.0", "telemetry_port": 5500, "frame_metadata_port": 5501,
     "clock_port": 5502, "primary_rtp_port": 5600, "fpv_rtp_port": 5610,
     "max_json_bytes": 1200, "rtp_payload_type": 96, "rtp_latency_ms": 20,
-    "preview_windows": True, "publish_video": True, "capture_rtp": False,
+    "preview_windows": False, "publish_video": True, "capture_rtp": False,
     "evidence_dir": "evidence", "android_clock_host": "", "android_clock_port": 5502,
     "clock_ping_interval_s": 1.0, "clock_response_timeout_s": 0.5, "dashboard_enabled": True,
     "dashboard_host": "127.0.0.1", "dashboard_port": 8090,
@@ -86,91 +85,74 @@ class UdpEndpoint(threading.Thread):
 
 
 class VideoFeed:
-    """Direct RTP/H.264 pipeline, ROS image publisher, and Edge metrics."""
+    """ROS-facing wrapper around one bounded, restartable feed pipeline."""
 
-    def __init__(self, node, name, port, topic, context_topic, capture_path):
+    def __init__(self, node, name, port, topic, context_topic, capture_path, ros_publish_enabled):
         self.node, self.name = node, name
-        self.decoded_frames = self.published_frames = self.dropped_frames = 0
+        self.published_frames = 0
+        self.ros_publish_enabled = ros_publish_enabled
         self.context_published = self.context_unavailable = 0
-        self.width = self.height = 0
-        self.error = None
-        self.pipeline = self.gst = None
-        self._stopping = threading.Event()
-        self._latest_frame = LatestFrameBuffer()
-        self._pts_binding = RtpPtsBinding()
-        self._sample_handler_id = None
-        self._ros_consumer_active = False
-        self.metrics = RtpMetrics(node.rtp_payload_type)
-        self.capture = RawRtpCapture(capture_path)
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.publisher = node.create_publisher(Image, topic, qos)
         self.context_publisher = node.create_publisher(FrameContext, context_topic, qos)
-        try:
-            import gi
-            gi.require_version("Gst", "1.0")
-            from gi.repository import Gst
-            self.gst = Gst
-            Gst.init(None)
-            self.pipeline = Gst.parse_launch(self._description(port))
-            self._sink = self.pipeline.get_by_name(f"{name}_sink")
-            self._sample_handler_id = self._sink.connect("new-sample", self._on_sample)
-            source = self.pipeline.get_by_name(f"{name}_source")
-            source.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, self._on_rtp)
-            jitter = self.pipeline.get_by_name(f"{name}_jitter")
-            jitter.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, self._on_jitter_rtp)
-            self.pipeline.set_state(Gst.State.PLAYING)
-        except Exception as error:
-            self.error = str(error)
-            node.get_logger().error(f"{name} video unavailable: {error}")
 
-    def _description(self, port):
-        preview = (
-            "queue leaky=downstream max-size-buffers=1 ! videoconvert ! ximagesink sync=false"
-            if self.node.preview_windows else "fakesink sync=false"
-        )
-        return (
-            f"udpsrc name={self.name}_source address={self.node.bind_host} port={port} buffer-size=4194304 "
-            "caps=application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,"
-            f"payload={self.node.rtp_payload_type} ! rtpjitterbuffer name={self.name}_jitter mode=none latency={self.node.rtp_latency_ms} "
-            "drop-on-latency=true do-lost=true ! rtph264depay wait-for-keyframe=true request-keyframe=true ! "
-            f"h264parse config-interval=-1 ! avdec_h264 ! videoconvert ! video/x-raw,format=BGR ! tee name={self.name}_decoded "
-            f"{self.name}_decoded. ! queue leaky=downstream max-size-buffers=1 ! "
-            f"video/x-raw,format=BGR ! appsink name={self.name}_sink emit-signals=true max-buffers=1 "
-            f"drop=true sync=false {self.name}_decoded. ! {preview}"
+        self.pipeline_service = FeedPipeline(
+            name=name,
+            port=port,
+            bind_host=node.bind_host,
+            payload_type=node.rtp_payload_type,
+            latency_ms=node.rtp_latency_ms,
+            preview_windows=node.preview_windows,
+            capture_path=capture_path,
+            logger=node.get_logger().error,
         )
 
-    def _on_sample(self, sink):
-        sample = sink.emit("pull-sample")
-        if sample is None or self._stopping.is_set():
-            return self.gst.FlowReturn.OK
-        caps = sample.get_caps().get_structure(0)
-        width, height = caps.get_value("width"), caps.get_value("height")
-        self.decoded_frames += 1
-        self.width, self.height = width, height
-        if not self._ros_consumer_active:
-            return self.gst.FlowReturn.OK
-        buffer = sample.get_buffer()
-        mapped_ok, mapped = buffer.map(self.gst.MapFlags.READ)
-        if mapped_ok:
-            try:
-                pts_ns = buffer.pts
-                if pts_ns == self.gst.CLOCK_TIME_NONE:
-                    pts_ns = None
-                frame = (width, height, bytes(mapped.data), time.monotonic_ns(), self._pts_binding.resolve(pts_ns))
-                if self._latest_frame.put(frame):
-                    self.dropped_frames += 1
-            finally:
-                buffer.unmap(mapped)
-        return self.gst.FlowReturn.OK
+    @property
+    def decoded_frames(self):
+        return self.pipeline_service.decoded_frames
+
+    @property
+    def width(self):
+        return self.pipeline_service.width
+
+    @property
+    def height(self):
+        return self.pipeline_service.height
+
+    @property
+    def error(self):
+        return self.pipeline_service.error
+
+    @property
+    def metrics(self):
+        return self.pipeline_service.metrics
+
+    @property
+    def dropped_frames(self):
+        return self.pipeline_service.dropped_old_frames
+
+    @property
+    def capture(self):
+        return self.pipeline_service.capture
+
+    @property
+    def _pts_binding(self):
+        return self.pipeline_service._pts_binding
+
+    def maintain(self):
+        self.pipeline_service.maintain()
+
+    def snapshot(self):
+        return self.pipeline_service.snapshot()
 
     def publish_latest(self):
         """Publish one newest frame from the ROS thread, never from GStreamer."""
-        if self._stopping.is_set() or not self._ros_consumer_active:
+        if not self.pipeline_service._ros_consumer_active:
             return
-        frame = self._latest_frame.take()
+        frame = self.pipeline_service.take_latest()
         if frame is None or not rclpy.ok():
             return
-        width, height, data, decoded_ns, rtp_identity = frame
+        width, height, data, decoded_ns, rtp_identity = frame.width, frame.height, frame.data, frame.decoded_mono_ns, frame.rtp_identity
         image = Image()
         image.header.stamp = self.node.get_clock().now().to_msg()
         image.header.frame_id = f"dji_{self.name}_camera"
@@ -186,44 +168,15 @@ class VideoFeed:
                 self.context_unavailable += 1
             self.published_frames += 1
         except RuntimeError:
-            if not self._stopping.is_set():
+            if not self.pipeline_service._stopping.is_set():
                 raise
 
     def set_ros_consumer_active(self, active):
         """Called only by the ROS executor to gate expensive pixel copies."""
-        self._ros_consumer_active = active
-        if not active:
-            self._latest_frame.clear()
-
-    def _on_rtp(self, _pad, info):
-        buffer = info.get_buffer()
-        if buffer is not None:
-            data = buffer.extract_dup(0, buffer.get_size())
-            if self.metrics.observe(data) is not None:
-                self.capture.write(data)
-        return self.gst.PadProbeReturn.OK
-
-    def _on_jitter_rtp(self, _pad, info):
-        buffer = info.get_buffer()
-        if buffer is None:
-            return self.gst.PadProbeReturn.OK
-        try:
-            packet = parse_rtp_packet(buffer.extract_dup(0, buffer.get_size()), self.node.rtp_payload_type)
-            pts_ns = None if buffer.pts == self.gst.CLOCK_TIME_NONE else int(buffer.pts)
-            self._pts_binding.observe(pts_ns, packet.ssrc, packet.timestamp)
-        except ProtocolError:
-            pass
-        return self.gst.PadProbeReturn.OK
+        self.pipeline_service.set_ros_consumer_active(self.ros_publish_enabled and active)
 
     def close(self):
-        self._stopping.set()
-        self._latest_frame.clear()
-        if self.pipeline is not None:
-            if self._sample_handler_id is not None:
-                self._sink.disconnect(self._sample_handler_id)
-                self._sample_handler_id = None
-            self.pipeline.set_state(self.gst.State.NULL)
-        self.capture.close()
+        self.pipeline_service.close()
 
 
 class EdgeBridge(Node):
@@ -263,6 +216,7 @@ class EdgeBridge(Node):
         self.videos = self._create_videos()
         self.create_timer(0.1, self.refresh_video_subscriptions)
         self.create_timer(1.0 / 60.0, self.publish_latest_frames)
+        self.create_timer(0.25, self.maintain_video_pipelines)
         self.create_timer(1.0, self.publish_diagnostics)
         self.clock_stop = threading.Event()
         self.clock_host = self.parameter("android_clock_host")
@@ -278,12 +232,11 @@ class EdgeBridge(Node):
         return self.get_parameter(name).value
 
     def _create_videos(self):
-        if not self.parameter("publish_video"):
-            return []
         capture = self.parameter("capture_rtp")
+        ros_publish_enabled = self.parameter("publish_video")
         return [
-            VideoFeed(self, "primary", self.parameter("primary_rtp_port"), self.parameter("primary_topic"), self.parameter("primary_context_topic"), str(self.evidence.root / "primary.rtpbin") if capture else None),
-            VideoFeed(self, "fpv", self.parameter("fpv_rtp_port"), self.parameter("fpv_topic"), self.parameter("fpv_context_topic"), str(self.evidence.root / "fpv.rtpbin") if capture else None),
+            VideoFeed(self, "primary", self.parameter("primary_rtp_port"), self.parameter("primary_topic"), self.parameter("primary_context_topic"), str(self.evidence.root / "primary.rtpbin") if capture else None, ros_publish_enabled),
+            VideoFeed(self, "fpv", self.parameter("fpv_rtp_port"), self.parameter("fpv_topic"), self.parameter("fpv_context_topic"), str(self.evidence.root / "fpv.rtpbin") if capture else None, ros_publish_enabled),
         ]
 
     def _create_dashboard(self):
@@ -323,6 +276,7 @@ class EdgeBridge(Node):
                 "android_clock_host": self.clock_host,
                 "capture_rtp": self.parameter("capture_rtp"),
                 "preview_windows": self.preview_windows,
+                "publish_video": self.parameter("publish_video"),
             },
             "ubuntu_ipv4": sorted(addresses),
         }
@@ -398,7 +352,7 @@ class EdgeBridge(Node):
             "data": packet.raw.get("data", packet.raw),
         }
         self.evidence.write("frame_metadata" if packet.packet_type in FRAME_TYPES else "telemetry", record)
-        if packet.packet_type in {"flight", "rtk", "gimbal"}:
+        if triggers_navigation(packet.packet_type):
             self.publish_navigation()
 
     def _reject(self, category, data, remote, edge_receive_ns, error):
@@ -526,6 +480,10 @@ class EdgeBridge(Node):
         for video in self.videos:
             video.publish_latest()
 
+    def maintain_video_pipelines(self):
+        for video in self.videos:
+            video.maintain()
+
     def refresh_video_subscriptions(self):
         for video in self.videos:
             video.set_ros_consumer_active(video.publisher.get_subscription_count() > 0)
@@ -534,13 +492,43 @@ class EdgeBridge(Node):
         evidence = self.evidence.health()
         status = DiagnosticStatus(name="dji_edge_driver/direct", level=DiagnosticStatus.OK if self.accepted and not self.endpoint_errors else DiagnosticStatus.WARN, message="direct Android ingress")
         status.values = [KeyValue(key="post_network.accepted", value=str(self.accepted)), KeyValue(key="post_network.rejected", value=str(self.rejected)), KeyValue(key="clock.pongs", value=str(self.clock_pongs)), KeyValue(key="evidence.path", value=str(self.evidence.root)), KeyValue(key="evidence.write_errors", value=str(evidence["write_errors"])), KeyValue(key="evidence.dropped_records", value=str(evidence["dropped_records"])), KeyValue(key="legacy_http_polling", value="disabled")]
+        video_evidence = []
         for port, error in self.endpoint_errors.items():
             status.values.append(KeyValue(key=f"udp.{port}.error", value=error))
         for video in self.videos:
             metrics = video.metrics.snapshot()
             binding = video._pts_binding.snapshot()
-            status.values.extend([KeyValue(key=f"{video.name}.decoded_frames", value=str(video.decoded_frames)), KeyValue(key=f"{video.name}.published_frames", value=str(video.published_frames)), KeyValue(key=f"{video.name}.dropped_old_frames", value=str(video.dropped_frames)), KeyValue(key=f"{video.name}.context_published", value=str(video.context_published)), KeyValue(key=f"{video.name}.context_unavailable", value=str(video.context_unavailable)), KeyValue(key=f"{video.name}.pts_binding_missing", value=str(binding["missing"])), KeyValue(key=f"{video.name}.resolution", value=f"{video.width}x{video.height}"), KeyValue(key=f"{video.name}.error", value=video.error or ""), KeyValue(key=f"{video.name}.rtp_packets", value=str(metrics["packets_received"])), KeyValue(key=f"{video.name}.rtp_gaps", value=str(metrics["sequence_gaps"])), KeyValue(key=f"{video.name}.fps", value=str(metrics["estimated_fps"]))])
-        self.evidence.write("transport", {"edge_observation": {"ingress": self.ingress_snapshot()}})
+            feed = video.snapshot()
+            status.values.extend([
+                KeyValue(key=f"{video.name}.decoded_frames", value=str(video.decoded_frames)),
+                KeyValue(key=f"{video.name}.published_frames", value=str(video.published_frames)),
+                KeyValue(key=f"{video.name}.dropped_old_frames", value=str(video.dropped_frames)),
+                KeyValue(key=f"{video.name}.context_published", value=str(video.context_published)),
+                KeyValue(key=f"{video.name}.context_unavailable", value=str(video.context_unavailable)),
+                KeyValue(key=f"{video.name}.pts_binding_missing", value=str(binding["missing"])),
+                KeyValue(key=f"{video.name}.resolution", value=f"{video.width}x{video.height}"),
+                KeyValue(key=f"{video.name}.error", value=video.error or ""),
+                KeyValue(key=f"{video.name}.status", value=self._feed_status(video.name, feed)),
+                KeyValue(key=f"{video.name}.last_rtp_age_s", value=str(metrics["last_datagram_age_s"])),
+                KeyValue(key=f"{video.name}.last_decoded_age_s", value=str(feed["last_decoded_age_s"])),
+                KeyValue(key=f"{video.name}.restart_count", value=str(feed["restart_count"])),
+                KeyValue(key=f"{video.name}.decoder_backend", value=feed["decoder"]["backend"]),
+                KeyValue(key=f"{video.name}.decoder_reason", value=feed["decoder"]["reason"]),
+                KeyValue(key=f"{video.name}.rtp_packets", value=str(metrics["packets_received"])),
+                KeyValue(key=f"{video.name}.rtp_gaps", value=str(metrics["sequence_gaps"])),
+                KeyValue(key=f"{video.name}.fps", value=str(metrics["estimated_fps"])),
+            ])
+            video_evidence.append({
+                "name": video.name,
+                "decoder": feed["decoder"],
+                "decoded_frames": video.decoded_frames,
+                "published_frames": video.published_frames,
+                "dropped_old_frames": video.dropped_frames,
+                "rtp": metrics,
+            })
+        self.evidence.write("transport", {
+            "edge_observation": {"ingress": self.ingress_snapshot(), "video": video_evidence}
+        })
         diagnostics = DiagnosticArray()
         diagnostics.header.stamp = self.get_clock().now().to_msg()
         diagnostics.status = [status]
@@ -549,12 +537,20 @@ class EdgeBridge(Node):
 
     def dashboard_state(self):
         evidence = self.evidence.health()
-        videos = [{"name": video.name, "decoded_frames": video.decoded_frames, "published_frames": video.published_frames, "dropped_old_frames": video.dropped_frames, "context": {"published": video.context_published, "unavailable": video.context_unavailable, "pts_binding": video._pts_binding.snapshot()}, "resolution": {"width": video.width, "height": video.height}, "error": video.error, "rtp": video.metrics.snapshot(), "capture_rtp": video.capture.enabled} for video in self.videos]
+        videos = []
+        signals = []
+        for video in self.videos:
+            feed = video.snapshot()
+            feed_status = self._feed_status(video.name, feed)
+            signals.append(feed_status)
+            videos.append({"name": video.name, "decoded_frames": video.decoded_frames, "published_frames": video.published_frames, "dropped_old_frames": video.dropped_frames, "context": {"published": video.context_published, "unavailable": video.context_unavailable, "pts_binding": video._pts_binding.snapshot()}, "resolution": {"width": video.width, "height": video.height}, "decoder": feed["decoder"], "error": video.error, "status": feed_status, "last_decoded_age_s": feed["last_decoded_age_s"], "last_bus_message": feed["last_bus_message"], "last_failure": feed["last_failure"], "last_failure_age_s": feed["last_failure_age_s"], "restart_count": feed["restart_count"], "restart_exhausted": feed["restart_exhausted"], "rtp": video.metrics.snapshot(), "capture_rtp": video.capture.enabled})
+        if "clock_pinger" in self.endpoint_errors:
+            signals.append("clock_timeout")
         ingress = self.ingress_snapshot()
         state = self.latest_state.snapshot()
         return {
             "schema_version": 1,
-            "status": "ok" if not self.endpoint_errors else "degraded",
+            "status": "ok" if not self.endpoint_errors and not any(video.error for video in self.videos) else "degraded",
             "evidence": {"path": str(self.evidence.root), **evidence},
             "clock": self.clock_mapper.estimate(),
             "configuration": {
@@ -576,7 +572,41 @@ class EdgeBridge(Node):
             "mapper": self.mapper_dashboard_config(),
             "video": videos,
             "udp_errors": self.endpoint_errors,
+            "signals": signals,
         }
+
+    def _feed_status(self, name, snapshot):
+        recent_failure = (
+            snapshot["last_failure_age_s"] is not None
+            and snapshot["last_failure_age_s"] <= 3.0
+        )
+        if recent_failure and snapshot["last_failure_preview_renderer_suspect"]:
+            return "primary_preview_renderer_suspect" if name == "primary" else "fpv_preview_renderer_suspect"
+        if recent_failure and str(snapshot["last_failure"]).startswith("WATCHDOG"):
+            return "primary_decode_stalled" if name == "primary" else "fpv_decode_stalled"
+        if recent_failure and snapshot["last_failure"]:
+            return "primary_pipeline_error" if name == "primary" else "fpv_pipeline_error"
+        if snapshot["restart_exhausted"]:
+            return "primary_pipeline_error" if name == "primary" else "fpv_pipeline_error"
+        if snapshot["preview_renderer_suspect"]:
+            return "primary_preview_renderer_suspect" if name == "primary" else "fpv_preview_renderer_suspect"
+        if snapshot["decode_stalled"]:
+            return "primary_decode_stalled" if name == "primary" else "fpv_decode_stalled"
+        if snapshot["pipeline_error"]:
+            return "primary_pipeline_error" if name == "primary" else "fpv_pipeline_error"
+        rtp = snapshot["rtp"]
+        if rtp["last_datagram_age_s"] is None:
+            if name == "fpv":
+                health = self.latest_state.snapshot().get("health") or {}
+                data = (health.get("data") or {}) if isinstance(health, dict) else {}
+                callbacks = data.get("secondary_video_callbacks", 0)
+                emitted = data.get("secondary_rtp_packets", 0)
+                if isinstance(callbacks, (int, float)) and callbacks > 0 and emitted == 0:
+                    return "fpv_not_emitted_by_android"
+            return "waiting_for_rtp"
+        if snapshot["last_decoded_age_s"] is None:
+            return "waiting_for_decode"
+        return "running"
 
     def ingress_snapshot(self):
         ingress = self.ingress.snapshot()

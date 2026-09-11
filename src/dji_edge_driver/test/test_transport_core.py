@@ -3,6 +3,7 @@ from pathlib import Path
 import socket
 import struct
 import threading
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -12,6 +13,7 @@ from dji_edge_transport_core.clock import ClockMapper
 from dji_edge_transport_core.clock_client import ClockPinger
 from dji_edge_transport_core.dashboard import DashboardServer, start_optional_dashboard
 from dji_edge_transport_core.evidence import EvidenceWriter, create_session_directory
+from dji_edge_transport_core.feed_pipeline import DecoderChoice, FeedState, select_decoder
 from dji_edge_transport_core import local_config
 from dji_edge_transport_core.local_config import atomic_write, resolve_ipv4_udp_target, save_requested_config, validate
 from dji_edge_transport_core import mapper_config
@@ -20,7 +22,7 @@ from dji_edge_transport_core.mapper_config import load as load_mapper_config
 from dji_edge_transport_core.mapper_config import save_requested_config as save_mapper_config
 from dji_edge_transport_core.mapper_config import validate as validate_mapper_config
 from dji_edge_transport_core.mapper_status import MapperStatusCache
-from dji_edge_transport_core.navigation import build_navigation
+from dji_edge_transport_core.navigation import build_navigation, triggers_navigation
 from dji_edge_transport_core.protocol import ProtocolError, decode_json_packet, parse_rtp_packet, video_au_identity
 from dji_edge_transport_core.rtp import RawRtpCapture, RtpMetrics
 from dji_edge_transport_core.state import IngressMetrics, LatestState, SequenceTracker
@@ -210,6 +212,99 @@ def test_latest_frame_buffer_replaces_stale_frames_without_queueing():
     assert frames.take() is None
 
 
+def test_feed_state_distinguishes_rtp_progress_from_decoder_stall():
+    state = FeedState("primary")
+    state.mark_decoded(1_000_000_000, 1280, 720)
+    assert state.is_stalled(0.1, 2_900_000_000, 2.0) is False
+    assert state.is_stalled(0.1, 3_100_000_000, 2.0) is True
+    state.mark_watchdog()
+    assert state.pipeline_error == "WATCHDOG: RTP advancing while decoded frames are stalled"
+    assert state.restart_requested is True
+
+
+def test_decoder_selection_prefers_nvidia_only_when_the_runtime_exposes_it():
+    missing = select_decoder(lambda _name: None)
+    assert missing == DecoderChoice(
+        "avdec_h264", "cpu", "GStreamer factory nvh264dec is unavailable"
+    )
+
+    available = select_decoder(lambda name: object() if name == "nvh264dec" else None)
+    assert available.element == "nvh264dec"
+    assert available.backend == "nvidia"
+
+
+def test_decoder_selection_reports_registry_probe_failure_without_claiming_nvidia():
+    choice = select_decoder(lambda _name: (_ for _ in ()).throw(RuntimeError("registry unavailable")))
+    assert choice.element == "avdec_h264"
+    assert choice.backend == "cpu"
+    assert "registry unavailable" in choice.reason
+
+
+def test_headless_pipeline_has_one_appsink_and_no_preview_branch():
+    from dji_edge_transport_core.feed_pipeline import FeedPipeline
+
+    pipeline = object.__new__(FeedPipeline)
+    pipeline.name = "primary"
+    pipeline.bind_host = "0.0.0.0"
+    pipeline.port = 5600
+    pipeline.payload_type = 96
+    pipeline.latency_ms = 20
+    pipeline.preview_windows = False
+    pipeline.decoder = DecoderChoice("avdec_h264", "cpu", "test")
+    description = pipeline._description()
+    assert description.count("appsink") == 1
+    assert "tee name=" not in description
+    assert "ximagesink" not in description
+    assert "fakesink" not in description
+
+
+def test_feed_state_records_bus_failure_without_confusing_it_with_source_time():
+    state = FeedState("fpv")
+    state.mark_failure("ERROR: not-negotiated")
+    assert state.pipeline_error == "ERROR: not-negotiated"
+    assert state.last_bus_message == "ERROR: not-negotiated"
+    assert state.restart_requested is True
+    assert state.last_decoded_mono_ns is None
+
+
+def test_feed_bus_events_are_ignored_after_intentional_close():
+    from dji_edge_transport_core.feed_pipeline import FeedPipeline
+
+    pipeline = object.__new__(FeedPipeline)
+    pipeline.name = "primary"
+    pipeline._stopping = threading.Event()
+    pipeline._intentional_close = True
+    pipeline._lock = threading.RLock()
+    pipeline.state = FeedState("primary")
+    pipeline._next_restart_mono = 0.0
+    assert pipeline.record_bus_event("EOS", "pipeline ended") is False
+    assert pipeline.state.restart_requested is False
+
+
+def test_feed_restart_failure_is_bounded_and_clears_stale_frame():
+    from dji_edge_transport_core.feed_pipeline import FeedPipeline
+
+    pipeline = object.__new__(FeedPipeline)
+    pipeline.name = "primary"
+    pipeline._stopping = threading.Event()
+    pipeline._intentional_close = False
+    pipeline._lock = threading.RLock()
+    pipeline.state = FeedState("primary")
+    pipeline._next_restart_mono = 0.0
+    pipeline._latest_frame = LatestFrameBuffer()
+    pipeline._pts_binding = RtpPtsBinding()
+    pipeline._gst = SimpleNamespace(parse_launch=lambda _description: (_ for _ in ()).throw(RuntimeError("bad pipeline")))
+    pipeline._description = lambda: ""
+    pipeline._logger = lambda _message: None
+    pipeline._teardown_pipeline = lambda: None
+    for _ in range(len(FeedPipeline._RESTART_BACKOFF_S)):
+        pipeline._restart()
+        pipeline._next_restart_mono = 0.0
+    assert pipeline.state.restart_exhausted is True
+    assert pipeline.state.restart_attempts == len(FeedPipeline._RESTART_BACKOFF_S)
+    assert pipeline._latest_frame.take() is None
+
+
 def test_rtp_pts_binding_fails_closed_for_missing_or_ambiguous_pipeline_time():
     binding = RtpPtsBinding(max_entries=2)
     assert binding.observe(101, 7, 11) is True
@@ -241,6 +336,15 @@ def test_rtp_metrics_classifies_wrap_gap_duplicate_and_access_units():
     assert snapshot["access_units_observed"] == 2
     assert snapshot["access_unit_bytes_total"] == 45
     assert snapshot["packets_rejected"] == 1
+
+
+def test_rtp_metrics_accepts_read_only_buffer_views_without_needing_a_packet_copy():
+    metrics = RtpMetrics(expected_payload_type=96)
+    packet = memoryview(
+        bytes([0x80, 0xE0, 0, 1]) + (123).to_bytes(4, "big") + (456).to_bytes(4, "big") + b"payload"
+    )
+    assert metrics.observe(packet) is not None
+    assert metrics.snapshot()["bytes_received"] == len(packet)
 
 
 def test_rtp_bitrate_uses_the_bounded_recent_measurement_window():
@@ -341,6 +445,13 @@ def test_navigation_falls_back_to_gps_and_rejects_missing_position():
     assert navigation["gimbal_pitch_valid"] is False
     assert navigation["transport_age_s"] is None
     assert build_navigation({"flight": None, "rtk": None}) is None
+
+
+def test_only_flight_packets_trigger_navigation_publication():
+    assert triggers_navigation("flight") is True
+    assert triggers_navigation("rtk") is False
+    assert triggers_navigation("gimbal") is False
+    assert triggers_navigation("health") is False
 
 
 def test_temporal_correlation_interpolates_frame_navigation_and_heading_wrap():
