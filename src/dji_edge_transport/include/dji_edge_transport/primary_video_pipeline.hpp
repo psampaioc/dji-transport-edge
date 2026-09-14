@@ -16,9 +16,14 @@ using GstBus = _GstBus;
 
 namespace dji_edge_transport {
 
+std::string format_gstreamer_error(
+  const std::string & source, const std::string & message, const std::string & debug);
+
 struct VideoSnapshot {
   std::uint64_t last_rtp_mono_ns{0};
   std::uint64_t last_decoded_mono_ns{0};
+  std::uint64_t ingress_packet_count{0};
+  std::uint64_t ingress_byte_count{0};
   std::uint64_t decoded_count{0};
   std::uint32_t width{0};
   std::uint32_t height{0};
@@ -30,7 +35,8 @@ struct VideoSnapshot {
 class PrimaryVideoPipeline {
 public:
   PrimaryVideoPipeline(std::string bind_host, std::uint16_t port, int payload_type,
-    int latency_ms, FrameHandoff & handoff, std::function<void(const std::string &)> logger);
+    int latency_ms, FrameHandoff & handoff, std::function<void()> frame_ready,
+    std::function<void(const std::string &)> logger);
   ~PrimaryVideoPipeline();
   PrimaryVideoPipeline(const PrimaryVideoPipeline &) = delete;
   PrimaryVideoPipeline & operator=(const PrimaryVideoPipeline &) = delete;
@@ -38,19 +44,21 @@ public:
   void poll_bus();
   void close();
   void accept_frame(DecodedFrame frame);
-  void observe_rtp();
+  void observe_rtp(std::size_t packet_bytes);
   VideoSnapshot snapshot() const;
   FrameHandoff & handoff() { return handoff_; }
 
 private:
   std::string description(const std::string & decoder) const;
   bool start_with_decoder(const std::string & decoder, const std::string & backend, const std::string & reason);
+  void reset_pipeline();
   void set_error(const std::string & error);
   std::string bind_host_;
   std::uint16_t port_;
   int payload_type_;
   int latency_ms_;
   FrameHandoff & handoff_;
+  std::function<void()> frame_ready_;
   std::function<void(const std::string &)> logger_;
   mutable std::mutex mutex_;
   GstElement * pipeline_{nullptr};
@@ -60,6 +68,8 @@ private:
   std::uint64_t last_rtp_mono_ns_{0};
   std::uint64_t last_decoded_mono_ns_{0};
   std::uint64_t decoded_count_{0};
+  std::uint64_t ingress_packet_count_{0};
+  std::uint64_t ingress_byte_count_{0};
   std::uint32_t width_{0};
   std::uint32_t height_{0};
   std::string decoder_backend_{"cpu"};

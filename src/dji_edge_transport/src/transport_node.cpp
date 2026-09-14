@@ -56,8 +56,10 @@ TransportNode::TransportNode()
 
   video_ = std::make_unique<PrimaryVideoPipeline>(
     bind_host_, static_cast<std::uint16_t>(primary_port), payload_type, latency_ms, handoff_,
+    [this]() { notify_frame_ready(); },
     [this](const std::string & error) { RCLCPP_ERROR(get_logger(), "Primary pipeline: %s", error.c_str()); });
   video_->start();
+  delivery_thread_ = std::thread(&TransportNode::delivery_loop, this);
 
   telemetry_receiver_ = std::make_unique<UdpReceiver>(
     bind_host_, static_cast<std::uint16_t>(telemetry_port), max_json_bytes_,
@@ -86,7 +88,6 @@ TransportNode::TransportNode()
     RCLCPP_WARN(get_logger(), "Dashboard unavailable: %s", dashboard_->error().c_str());
   }
 
-  frame_timer_ = create_wall_timer(std::chrono::milliseconds(16), [this]() { publish_frame(); });
   status_timer_ = create_wall_timer(
     std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<double>(diagnostics_period)),
     [this]() { publish_status(); });
@@ -94,12 +95,41 @@ TransportNode::TransportNode()
 
 TransportNode::~TransportNode()
 {
+  {
+    std::lock_guard<std::mutex> lock(delivery_mutex_);
+    delivery_stopping_ = true;
+  }
+  delivery_cv_.notify_one();
+  if (delivery_thread_.joinable()) delivery_thread_.join();
   if (telemetry_receiver_) telemetry_receiver_->stop();
   if (metadata_receiver_) metadata_receiver_->stop();
   if (clock_receiver_) clock_receiver_->stop();
   if (clock_pinger_) clock_pinger_->stop();
   if (dashboard_) dashboard_->stop();
   if (video_) video_->close();
+}
+
+void TransportNode::notify_frame_ready()
+{
+  {
+    std::lock_guard<std::mutex> lock(delivery_mutex_);
+    if (delivery_stopping_) return;
+    delivery_pending_ = true;
+  }
+  delivery_cv_.notify_one();
+}
+
+void TransportNode::delivery_loop()
+{
+  std::unique_lock<std::mutex> lock(delivery_mutex_);
+  while (true) {
+    delivery_cv_.wait(lock, [this]() { return delivery_stopping_ || delivery_pending_; });
+    if (delivery_stopping_) return;
+    delivery_pending_ = false;
+    lock.unlock();
+    publish_frame();
+    lock.lock();
+  }
 }
 
 builtin_interfaces::msg::Time TransportNode::ros_stamp()
@@ -181,21 +211,31 @@ void TransportNode::publish_frame()
   video_->poll_bus();
   auto frame = handoff_.take();
   if (!frame) return;
-  sensor_msgs::msg::Image image;
-  image.header.stamp = ros_stamp();
-  image.header.frame_id = "dji_primary_camera";
-  image.width = frame->width;
-  image.height = frame->height;
-  image.encoding = "bgr8";
-  image.is_bigendian = false;
-  image.step = frame->width * 3;
-  image.data = std::move(frame->bgr);
-  image_publisher_->publish(image);
+  auto image = std::make_unique<sensor_msgs::msg::Image>();
+  image->header.stamp = ros_stamp();
+  image->header.frame_id = "dji_primary_camera";
+  image->width = frame->width;
+  image->height = frame->height;
+  image->encoding = "bgr8";
+  image->is_bigendian = false;
+  image->step = frame->width * 3;
+  image->data = std::move(frame->bgr);
+  const auto header = image->header;
+  try {
+    image_publisher_->publish(std::move(image));
+  } catch (const rclcpp::exceptions::RCLError &) {
+    ++publish_error_count_;
+    return;
+  }
   last_published_mono_ns_.store(now_ns());
   published_count_.fetch_add(1);
 
-  const auto context = make_unavailable_primary_context(image.header, *frame);
-  context_publisher_->publish(context);
+  const auto context = make_unavailable_primary_context(header, *frame);
+  try {
+    context_publisher_->publish(context);
+  } catch (const rclcpp::exceptions::RCLError &) {
+    ++publish_error_count_;
+  }
 }
 
 void TransportNode::publish_status()
@@ -213,6 +253,8 @@ void TransportNode::publish_status()
   status.decoded_count = snapshot.decoded_count;
   status.published_count = published_count_.load();
   status.dropped_old_frame_count = handoff_.dropped_old_frames();
+  status.ingress_packet_count = snapshot.ingress_packet_count;
+  status.ingress_byte_count = snapshot.ingress_byte_count;
   status.width = snapshot.width;
   status.height = snapshot.height;
   status.decoder_backend = snapshot.decoder_backend;
@@ -231,12 +273,20 @@ void TransportNode::publish_status()
   }
   if (last_rate_mono_ns_ != 0 && current > last_rate_mono_ns_) {
     const auto seconds = static_cast<double>(current - last_rate_mono_ns_) / 1e9;
-    status.decoded_fps = static_cast<double>(snapshot.decoded_count - last_rate_decoded_count_) / seconds;
-    status.published_fps = static_cast<double>(published_count_.load() - last_rate_published_count_) / seconds;
+    ingress_bitrate_bps_.store(static_cast<double>(snapshot.ingress_byte_count - last_rate_ingress_bytes_) * 8.0 / seconds);
+    decoded_fps_.store(static_cast<double>(snapshot.decoded_count - last_rate_decoded_count_) / seconds);
+    published_fps_.store(static_cast<double>(published_count_.load() - last_rate_published_count_) / seconds);
+    superseded_frame_rate_.store(static_cast<double>(status.dropped_old_frame_count - last_rate_dropped_count_) / seconds);
   }
+  status.ingress_bitrate_bps = ingress_bitrate_bps_.load();
+  status.decoded_fps = decoded_fps_.load();
+  status.published_fps = published_fps_.load();
+  status.superseded_frame_rate = superseded_frame_rate_.load();
   last_rate_mono_ns_ = current;
+  last_rate_ingress_bytes_ = snapshot.ingress_byte_count;
   last_rate_decoded_count_ = snapshot.decoded_count;
   last_rate_published_count_ = published_count_.load();
+  last_rate_dropped_count_ = status.dropped_old_frame_count;
   if (!snapshot.pipeline_error.empty()) {
     status.state = msg::TransportStatus::PIPELINE_ERROR;
     status.state_reason = snapshot.pipeline_error;
@@ -246,6 +296,11 @@ void TransportNode::publish_status()
   } else if (snapshot.decoded_count == 0) {
     status.state = msg::TransportStatus::WAITING_FOR_KEYFRAME;
     status.state_reason = "RTP observed; waiting for a decodable keyframe";
+  } else if (status.published_count > 0 && status.decoded_age_s >= 0.0 && status.decoded_age_s < 1.0 &&
+    status.published_age_s > 1.0)
+  {
+    status.state = msg::TransportStatus::DELIVERY_STALLED;
+    status.state_reason = "decoded Primary image is not reaching ROS publication";
   } else {
     status.state = published_count_.load() > 0 ? msg::TransportStatus::PUBLISHING : msg::TransportStatus::DECODING;
     status.state_reason = "Primary pipeline active";
@@ -275,6 +330,9 @@ std::string TransportNode::dashboard_state() const
       {"published_age_s", age_seconds(current, last_published_mono_ns_.load())},
       {"decoded_count", snapshot.decoded_count}, {"published_count", published_count_.load()},
       {"dropped_old_frames", handoff_.dropped_old_frames()}, {"width", snapshot.width}, {"height", snapshot.height},
+      {"ingress_packets", snapshot.ingress_packet_count}, {"ingress_bytes", snapshot.ingress_byte_count},
+      {"ingress_bitrate_bps", ingress_bitrate_bps_.load()}, {"decoded_fps", decoded_fps_.load()},
+      {"published_fps", published_fps_.load()}, {"superseded_frame_rate", superseded_frame_rate_.load()},
       {"decoder", snapshot.decoder_backend}, {"decoder_reason", snapshot.decoder_reason}, {"pipeline_error", snapshot.pipeline_error}}},
     {"clock", {{"ready", clock.ready}, {"sample_count", clock.sample_count}, {"best_rtt_ns", clock.best_rtt_ns},
       {"offset_android_minus_edge_ns", clock.offset_android_minus_edge_ns},

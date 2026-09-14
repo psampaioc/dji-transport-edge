@@ -86,18 +86,17 @@ Clock mapping estimates Android-minus-edge monotonic offset. It does not manufac
 ## Edge-side video health
 
 The following are Edge observations, not additions to the Android wire
-contract. The driver keeps one GStreamer decoder per logical feed and a
+contract. The current Primary transport keeps one GStreamer decoder and a
 one-item newest-frame handoff. It records separate ages for the last RTP
-datagram and last decoded frame. When RTP remains fresh while decoded progress
-stops, the feed is marked stalled and may be recreated with bounded backoff;
-only that feed's internal pipeline, PTS binding and stale frame are reset.
-Telemetry, navigation history, the other feed and all Android/DJI source-time
-fields remain untouched. An intentional shutdown never triggers a restart.
+datagram, decoded image and ROS publication. When RTP remains fresh while
+decoded progress stops, it reports the waiting boundary and waits for a future
+sender IDR; it does not recreate the decoder automatically. Telemetry,
+navigation history and all Android/DJI source-time fields remain untouched.
 
-`primary_decode_stalled`, `primary_pipeline_error`,
-`fpv_not_emitted_by_android`, and `clock_timeout` are operator-facing diagnostic statuses. They locate the
-failure boundary and must not be interpreted as new packet types or as source
-timestamps.
+`primary_decode_stalled`, `primary_delivery_stalled`,
+`primary_pipeline_error`, `fpv_not_emitted_by_android`, and `clock_timeout` are
+operator-facing diagnostic statuses. They locate the failure boundary and must
+not be interpreted as new packet types or as source timestamps.
 
 `primary_preview_renderer_suspect` and its FPV equivalent can appear only when the optional native preview is explicitly enabled for a short diagnostic; they are not part of the default headless route.
 

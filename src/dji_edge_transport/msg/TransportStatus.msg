@@ -4,6 +4,7 @@ uint8 DECODING=2
 uint8 PUBLISHING=3
 uint8 PIPELINE_ERROR=4
 uint8 SHUTDOWN=5
+uint8 DELIVERY_STALLED=6
 std_msgs/Header header
 uint8 state
 string state_reason
@@ -14,10 +15,14 @@ float64 published_age_s
 uint64 decoded_count
 uint64 published_count
 uint64 dropped_old_frame_count
+uint64 ingress_packet_count
+uint64 ingress_byte_count
 uint32 width
 uint32 height
 float64 decoded_fps
 float64 published_fps
+float64 ingress_bitrate_bps
+float64 superseded_frame_rate
 string decoder_backend
 string decoder_reason
 string pipeline_error

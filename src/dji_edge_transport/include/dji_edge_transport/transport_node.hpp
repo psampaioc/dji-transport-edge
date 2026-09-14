@@ -16,9 +16,11 @@
 #include <sensor_msgs/msg/image.hpp>
 
 #include <memory>
+#include <condition_variable>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 
 namespace dji_edge_transport {
 
@@ -33,6 +35,8 @@ private:
   void on_frame_metadata(const std::vector<std::uint8_t> & bytes, std::uint64_t receive_ns);
   void on_clock(const std::vector<std::uint8_t> & bytes, std::uint64_t receive_ns);
   void publish_frame();
+  void notify_frame_ready();
+  void delivery_loop();
   void publish_status();
   void publish_navigation(const TelemetryPacket & packet);
   void log_protocol_error(const std::string & category, const std::string & error);
@@ -57,8 +61,12 @@ private:
   rclcpp::Publisher<dji_edge_transport::msg::NavigationState>::SharedPtr navigation_publisher_;
   rclcpp::Publisher<msg::TransportStatus>::SharedPtr status_publisher_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_publisher_;
-  rclcpp::TimerBase::SharedPtr frame_timer_;
   rclcpp::TimerBase::SharedPtr status_timer_;
+  std::mutex delivery_mutex_;
+  std::condition_variable delivery_cv_;
+  bool delivery_pending_{false};
+  bool delivery_stopping_{false};
+  std::thread delivery_thread_;
   std::mutex state_mutex_;
   std::optional<TelemetryPacket> latest_telemetry_;
   std::optional<FrameMetadata> latest_metadata_;
@@ -68,8 +76,14 @@ private:
   std::atomic<std::uint64_t> published_count_{0};
   std::uint64_t publish_error_count_{0};
   std::uint64_t last_rate_mono_ns_{0};
+  std::uint64_t last_rate_ingress_bytes_{0};
   std::uint64_t last_rate_decoded_count_{0};
   std::uint64_t last_rate_published_count_{0};
+  std::uint64_t last_rate_dropped_count_{0};
+  std::atomic<double> ingress_bitrate_bps_{0.0};
+  std::atomic<double> decoded_fps_{0.0};
+  std::atomic<double> published_fps_{0.0};
+  std::atomic<double> superseded_frame_rate_{0.0};
 };
 
 }  // namespace dji_edge_transport

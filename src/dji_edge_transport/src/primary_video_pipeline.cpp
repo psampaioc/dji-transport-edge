@@ -10,6 +10,8 @@
 
 namespace dji_edge_transport {
 namespace {
+constexpr std::size_t kMaximumGstreamerDebugBytes = 1024;
+
 std::uint64_t now_ns()
 {
   return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -51,15 +53,34 @@ GstFlowReturn on_sample(GstAppSink * sink, gpointer user_data)
 GstPadProbeReturn on_source_buffer(GstPad *, GstPadProbeInfo * info, gpointer user_data)
 {
   auto * self = static_cast<PrimaryVideoPipeline *>(user_data);
-  if (GST_PAD_PROBE_INFO_BUFFER(info)) self->observe_rtp();
+  if (auto * buffer = GST_PAD_PROBE_INFO_BUFFER(info)) self->observe_rtp(gst_buffer_get_size(buffer));
   return GST_PAD_PROBE_OK;
 }
 }
 
+std::string format_gstreamer_error(
+  const std::string & source, const std::string & message, const std::string & debug)
+{
+  std::ostringstream formatted;
+  formatted << "GStreamer";
+  if (!source.empty()) formatted << " [" << source << "]";
+  formatted << ": " << message;
+  if (debug.empty()) return formatted.str();
+
+  std::string normalized = debug.substr(0, kMaximumGstreamerDebugBytes);
+  for (auto & character : normalized) {
+    if (character == '\n' || character == '\r' || character == '\t') character = ' ';
+  }
+  formatted << " | " << normalized;
+  if (debug.size() > normalized.size()) formatted << " [truncated]";
+  return formatted.str();
+}
+
 PrimaryVideoPipeline::PrimaryVideoPipeline(std::string bind_host, std::uint16_t port, int payload_type,
-  int latency_ms, FrameHandoff & handoff, std::function<void(const std::string &)> logger)
+  int latency_ms, FrameHandoff & handoff, std::function<void()> frame_ready,
+  std::function<void(const std::string &)> logger)
 : bind_host_(std::move(bind_host)), port_(port), payload_type_(payload_type), latency_ms_(latency_ms),
-  handoff_(handoff), logger_(std::move(logger))
+  handoff_(handoff), frame_ready_(std::move(frame_ready)), logger_(std::move(logger))
 {
   gst_init(nullptr, nullptr);
 }
@@ -88,6 +109,11 @@ bool PrimaryVideoPipeline::start_with_decoder(const std::string & decoder, const
     return false;
   }
   sink_ = gst_bin_get_by_name(GST_BIN(pipeline_), "primary_sink");
+  if (!sink_) {
+    set_error("GStreamer appsink was not created");
+    reset_pipeline();
+    return false;
+  }
   auto * source = gst_bin_get_by_name(GST_BIN(pipeline_), "primary_source");
   if (source) {
     auto * pad = gst_element_get_static_pad(source, "src");
@@ -104,7 +130,7 @@ bool PrimaryVideoPipeline::start_with_decoder(const std::string & decoder, const
   const auto result = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
   if (result == GST_STATE_CHANGE_FAILURE) {
     set_error("GStreamer pipeline could not enter PLAYING");
-    close();
+    reset_pipeline();
     return false;
   }
   decoder_backend_ = backend;
@@ -121,13 +147,16 @@ void PrimaryVideoPipeline::accept_frame(DecodedFrame frame)
   last_decoded_mono_ns_ = frame.decoded_mono_ns;
   ++decoded_count_;
   handoff_.replace(std::move(frame));
+  if (frame_ready_) frame_ready_();
 }
 
-void PrimaryVideoPipeline::observe_rtp()
+void PrimaryVideoPipeline::observe_rtp(std::size_t packet_bytes)
 {
   std::lock_guard<std::mutex> lock(mutex_);
   last_rtp_mono_ns_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
     std::chrono::steady_clock::now().time_since_epoch()).count());
+  ++ingress_packet_count_;
+  ingress_byte_count_ += packet_bytes;
 }
 
 bool PrimaryVideoPipeline::start()
@@ -156,7 +185,10 @@ void PrimaryVideoPipeline::poll_bus()
       GError * error = nullptr;
       gchar * debug = nullptr;
       gst_message_parse_error(message, &error, &debug);
-      set_error(error ? error->message : "GStreamer error");
+      const auto * source = GST_MESSAGE_SRC(message);
+      set_error(format_gstreamer_error(
+        source ? GST_OBJECT_NAME(source) : "", error ? error->message : "GStreamer error",
+        debug ? debug : ""));
       if (error) g_error_free(error);
       if (debug) g_free(debug);
     } else {
@@ -169,6 +201,11 @@ void PrimaryVideoPipeline::poll_bus()
 void PrimaryVideoPipeline::close()
 {
   if (closed_.exchange(true)) return;
+  reset_pipeline();
+}
+
+void PrimaryVideoPipeline::reset_pipeline()
+{
   if (pipeline_) gst_element_set_state(pipeline_, GST_STATE_NULL);
   if (bus_) gst_object_unref(bus_);
   if (sink_) gst_object_unref(sink_);
@@ -185,6 +222,8 @@ VideoSnapshot PrimaryVideoPipeline::snapshot() const
   snapshot.last_rtp_mono_ns = last_rtp_mono_ns_;
   snapshot.last_decoded_mono_ns = last_decoded_mono_ns_;
   snapshot.decoded_count = decoded_count_;
+  snapshot.ingress_packet_count = ingress_packet_count_;
+  snapshot.ingress_byte_count = ingress_byte_count_;
   snapshot.width = width_;
   snapshot.height = height_;
   snapshot.decoder_backend = decoder_backend_;
