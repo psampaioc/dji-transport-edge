@@ -53,7 +53,13 @@ GstFlowReturn on_sample(GstAppSink * sink, gpointer user_data)
 GstPadProbeReturn on_source_buffer(GstPad *, GstPadProbeInfo * info, gpointer user_data)
 {
   auto * self = static_cast<PrimaryVideoPipeline *>(user_data);
-  if (auto * buffer = GST_PAD_PROBE_INFO_BUFFER(info)) self->observe_rtp(gst_buffer_get_size(buffer));
+  if (auto * buffer = GST_PAD_PROBE_INFO_BUFFER(info)) {
+    GstMapInfo map{};
+    if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+      self->observe_rtp(map.data, map.size);
+      gst_buffer_unmap(buffer, &map);
+    }
+  }
   return GST_PAD_PROBE_OK;
 }
 }
@@ -81,6 +87,7 @@ PrimaryVideoPipeline::PrimaryVideoPipeline(std::string bind_host, std::uint16_t 
   std::function<void(const std::string &)> logger)
 : bind_host_(std::move(bind_host)), port_(port), payload_type_(payload_type), latency_ms_(latency_ms),
   handoff_(handoff), frame_ready_(std::move(frame_ready)), logger_(std::move(logger))
+  , rtp_tracker_(static_cast<std::uint8_t>(payload_type))
 {
   gst_init(nullptr, nullptr);
 }
@@ -150,13 +157,14 @@ void PrimaryVideoPipeline::accept_frame(DecodedFrame frame)
   if (frame_ready_) frame_ready_();
 }
 
-void PrimaryVideoPipeline::observe_rtp(std::size_t packet_bytes)
+void PrimaryVideoPipeline::observe_rtp(const std::uint8_t * packet, std::size_t packet_bytes)
 {
   std::lock_guard<std::mutex> lock(mutex_);
   last_rtp_mono_ns_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
     std::chrono::steady_clock::now().time_since_epoch()).count());
   ++ingress_packet_count_;
   ingress_byte_count_ += packet_bytes;
+  rtp_tracker_.observe(packet, packet_bytes);
 }
 
 bool PrimaryVideoPipeline::start()
@@ -222,6 +230,7 @@ VideoSnapshot PrimaryVideoPipeline::snapshot() const
   snapshot.last_rtp_mono_ns = last_rtp_mono_ns_;
   snapshot.last_decoded_mono_ns = last_decoded_mono_ns_;
   snapshot.decoded_count = decoded_count_;
+  snapshot.rtp = rtp_tracker_.snapshot();
   snapshot.ingress_packet_count = ingress_packet_count_;
   snapshot.ingress_byte_count = ingress_byte_count_;
   snapshot.width = width_;

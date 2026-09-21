@@ -1,0 +1,1 @@
+{"v":1,"type":"flight","session":"fixture-session","stream":"flight:0","seq":1,"rx_mono_ns":100,"data":{"fields":{"aircraft.latitude_deg":{"value":38.7,"valid":true},"aircraft.longitude_deg":{"value":-9.1,"valid":true},"aircraft.altitude_m":{"value":12.5,"valid":true},"heading_deg":{"value":270.0,"valid":true}}}}

@@ -13,6 +13,10 @@ def generate_launch_description():
         / "config"
         / "transport.yaml"
     )
+    local_config = Path("/workspace/transport.local.yaml")
+    parameters = [LaunchConfiguration("config_file")]
+    if local_config.is_file():
+        parameters.append(str(local_config))
     return LaunchDescription([
         DeclareLaunchArgument("config_file", default_value=default_config),
         Node(
@@ -20,6 +24,6 @@ def generate_launch_description():
             executable="dji_edge_transport_node",
             name="dji_edge_transport",
             output="screen",
-            parameters=[LaunchConfiguration("config_file")],
+            parameters=parameters,
         ),
     ])

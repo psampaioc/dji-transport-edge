@@ -1,0 +1,1 @@
+{"v":1,"type":"gimbal","session":"fixture-session","stream":"gimbal:0","seq":13,"rx_mono_ns":1003000000,"data":{"fields":{"attitude.pitch_deg":{"value":-42.5,"valid":true}}}}

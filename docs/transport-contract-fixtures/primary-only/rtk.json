@@ -1,0 +1,1 @@
+{"v":1,"type":"rtk","session":"fixture-session","stream":"rtk:0","seq":12,"rx_mono_ns":1002000000,"data":{"fields":{"fusion.latitude_deg":{"value":38.7001,"valid":true},"fusion.longitude_deg":{"value":-9.1001,"valid":true},"is_being_used":{"value":true,"valid":true}}}}

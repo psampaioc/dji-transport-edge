@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace dji_edge_transport {
 
@@ -22,6 +23,8 @@ public:
 
 private:
   void run();
+  std::string config_json() const;
+  bool update_config(const std::string & action, const std::string & host, std::string & error);
   std::uint16_t port_;
   std::string local_config_path_;
   StateProvider state_provider_;

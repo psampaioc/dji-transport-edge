@@ -60,7 +60,10 @@ void UdpReceiver::run()
   }
   std::vector<std::uint8_t> buffer(max_bytes_ + 1);
   while (!stopping_.load()) {
-    const auto received = recvfrom(socket_, buffer.data(), buffer.size(), 0, nullptr, nullptr);
+    sockaddr_in peer_address{};
+    socklen_t peer_size = sizeof(peer_address);
+    const auto received = recvfrom(socket_, buffer.data(), buffer.size(), 0,
+      reinterpret_cast<sockaddr *>(&peer_address), &peer_size);
     if (received < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
       if (!stopping_.load()) rejected_.fetch_add(1);
@@ -72,9 +75,12 @@ void UdpReceiver::run()
       continue;
     }
     std::vector<std::uint8_t> packet(buffer.begin(), buffer.begin() + received);
+    char peer_ipv4[INET_ADDRSTRLEN]{};
+    inet_ntop(AF_INET, &peer_address.sin_addr, peer_ipv4, sizeof(peer_ipv4));
+    const UdpPeer peer{peer_ipv4, ntohs(peer_address.sin_port)};
     received_.fetch_add(1);
     last_receive_mono_ns_.store(receive_ns);
-    callback_(packet, receive_ns);
+    callback_(packet, receive_ns, peer);
   }
 }
 

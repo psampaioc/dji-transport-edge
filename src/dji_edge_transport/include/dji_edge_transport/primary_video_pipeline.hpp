@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dji_edge_transport/frame_handoff.hpp"
+#include "dji_edge_transport/rtp_ingress_tracker.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -25,6 +26,7 @@ struct VideoSnapshot {
   std::uint64_t ingress_packet_count{0};
   std::uint64_t ingress_byte_count{0};
   std::uint64_t decoded_count{0};
+  RtpIngressSnapshot rtp;
   std::uint32_t width{0};
   std::uint32_t height{0};
   std::string decoder_backend{"cpu"};
@@ -44,7 +46,7 @@ public:
   void poll_bus();
   void close();
   void accept_frame(DecodedFrame frame);
-  void observe_rtp(std::size_t packet_bytes);
+  void observe_rtp(const std::uint8_t * packet, std::size_t packet_bytes);
   VideoSnapshot snapshot() const;
   FrameHandoff & handoff() { return handoff_; }
 
@@ -70,6 +72,7 @@ private:
   std::uint64_t decoded_count_{0};
   std::uint64_t ingress_packet_count_{0};
   std::uint64_t ingress_byte_count_{0};
+  RtpIngressTracker rtp_tracker_;
   std::uint32_t width_{0};
   std::uint32_t height_{0};
   std::string decoder_backend_{"cpu"};

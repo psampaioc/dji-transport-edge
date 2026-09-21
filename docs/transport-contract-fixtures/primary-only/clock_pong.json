@@ -1,0 +1,1 @@
+{"v":1,"type":"clock_pong","session":"edge-clock","stream":"clock","seq":7,"t0_edge_send_mono_ns":900,"t1_android_rx_mono_ns":1000,"t2_android_tx_mono_ns":1010}

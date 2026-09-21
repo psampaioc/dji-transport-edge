@@ -4,10 +4,19 @@ namespace dji_edge_transport {
 
 SourceTimeState::SourceTimeState(std::size_t capacity) : capacity_(capacity) {}
 
+void SourceTimeState::reset(std::string active_session)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  active_session_ = std::move(active_session);
+  history_.clear();
+}
+
 void SourceTimeState::add(TelemetryPacket packet)
 {
   if (packet.type != "flight" && packet.type != "rtk" && packet.type != "gimbal") return;
   std::lock_guard<std::mutex> lock(mutex_);
+  if (active_session_.empty()) active_session_ = packet.session;
+  if (packet.session != active_session_) return;
   auto & samples = history_[packet.type];
   if (!samples.empty() && packet.android_mono_ns <= samples.back().android_mono_ns) return;
   samples.push_back(std::move(packet));

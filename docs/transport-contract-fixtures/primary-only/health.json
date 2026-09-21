@@ -1,0 +1,1 @@
+{"v":1,"type":"health","session":"fixture-session","stream":"health:0","seq":1,"rx_mono_ns":100,"data":{"primary_video_callbacks":10,"primary_video_callback_drops":0,"primary_rtp_packets":20,"primary_access_units":5,"telemetry_queue_drops":0,"telemetry_socket_errors":0,"video_socket_errors":0}}

@@ -3,6 +3,15 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <array>
+
+namespace {
+std::array<std::uint8_t, 12> rtp_packet(std::uint16_t sequence)
+{
+  return {0x80, 96, static_cast<std::uint8_t>(sequence >> 8), static_cast<std::uint8_t>(sequence),
+    0, 0, 0, 1, 0, 0, 0, 2};
+}
+}  // namespace
 
 TEST(PrimaryVideoPipeline, TracksIngressWithoutRetainingPayload)
 {
@@ -12,8 +21,10 @@ TEST(PrimaryVideoPipeline, TracksIngressWithoutRetainingPayload)
     "0.0.0.0", 5600, 96, 20, handoff, [&notifications]() { ++notifications; },
     [](const std::string &) {});
 
-  pipeline.observe_rtp(1200);
-  pipeline.observe_rtp(42);
+  auto first = rtp_packet(1);
+  auto second = rtp_packet(2);
+  pipeline.observe_rtp(first.data(), 1200);
+  pipeline.observe_rtp(second.data(), 42);
 
   const auto snapshot = pipeline.snapshot();
   EXPECT_NE(snapshot.last_rtp_mono_ns, 0u);

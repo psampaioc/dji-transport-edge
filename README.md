@@ -19,7 +19,7 @@ dji_edge_transport: one C++ ROS node
 dji_edge_mapper: static PCD map, pose, path and RViz
 ```
 
-The workspace contains `dji_edge_transport` and `dji_edge_mapper`. [docs/PROTOCOL_V1.md](docs/PROTOCOL_V1.md) owns Android ports, compact JSON, RTP/H.264 and original Android/DJI timestamps.
+The workspace contains `dji_edge_transport` and `dji_edge_mapper`. [docs/PROTOCOL_V1.md](docs/PROTOCOL_V1.md) owns Android ports, compact JSON, RTP/H.264 and original Android/DJI timestamps. Primary only is supported; no Edge FPV listener exists.
 
 ## Start
 
@@ -33,7 +33,7 @@ source install/setup.bash
 ros2 launch dji_edge_mapper dji_edge_bringup.launch.py
 ```
 
-Use `rviz:=false` for a headless bench. The dashboard starts automatically when 8090 is free but is optional: video, ROS and mapping continue if it is closed or unavailable. It shows post-network ingress bytes/bitrate, decoded and published FPS, ages, superseded frames, resolution, decoder, pipeline error and clock state. It only persists `android_clock_host` for the next launch.
+Use `rviz:=false` for a headless bench. The dashboard starts automatically when 8090 is free but is optional: video, ROS and mapping continue if it is closed or unavailable. It shows distinct Android-local sender health, Edge metadata/RTP/decode/publication, clock and bounded evidence state. It only persists `android_clock_host` for the next launch.
 
 ## Video latency policy
 
@@ -59,6 +59,6 @@ gst-inspect-1.0 avdec_h264
 
 ## Bench and map configuration
 
-Follow [docs/PRIMARY_CPP_BENCH.md](docs/PRIMARY_CPP_BENCH.md) for a 60-second props-off run. Its result must identify the first stopped boundary: Android sender, Edge RTP ingress, H.264 decode, ROS publication or RViz-only rendering. Change Android resolution, bitrate, FPS or IDR cadence only from that evidence. FPV is not part of the current transport implementation and cannot affect Primary.
+Follow [docs/PRIMARY_CPP_BENCH.md](docs/PRIMARY_CPP_BENCH.md) for a 60-second props-off run. Its result must identify the first stopped observable boundary: Android-local sender counters, Edge RTP ingress, H.264 decode, ROS publication or RViz-only rendering. It must not call an Android-to-Edge gap Wi-Fi loss without direct proof. Change Android resolution, bitrate, FPS or IDR cadence only from that evidence.
 
 Map assets/calibration are local and ignored by Git. Create `src/dji_edge_mapper/config/mapper.local.yaml` from its example and place the matching map files beside it. Without those assets transport still works, but the mapper cannot publish a real map/path.

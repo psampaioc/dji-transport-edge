@@ -1,10 +1,13 @@
 #pragma once
 
 #include "dji_edge_transport/primary_video_pipeline.hpp"
+#include "dji_edge_transport/primary_health_evaluator.hpp"
 #include "dji_edge_transport/clock_mapper.hpp"
 #include "dji_edge_transport/clock_pinger.hpp"
 #include "dji_edge_transport/dashboard_server.hpp"
 #include "dji_edge_transport/protocol_decoder.hpp"
+#include "dji_edge_transport/session_tracker.hpp"
+#include "dji_edge_transport/session_evidence_writer.hpp"
 #include "dji_edge_transport/source_time_state.hpp"
 #include "dji_edge_transport/udp_receiver.hpp"
 #include "dji_edge_transport/msg/transport_status.hpp"
@@ -31,18 +34,27 @@ public:
 
 private:
   builtin_interfaces::msg::Time ros_stamp();
-  void on_telemetry(const std::vector<std::uint8_t> & bytes, std::uint64_t receive_ns);
-  void on_frame_metadata(const std::vector<std::uint8_t> & bytes, std::uint64_t receive_ns);
-  void on_clock(const std::vector<std::uint8_t> & bytes, std::uint64_t receive_ns);
+  void on_telemetry(const std::vector<std::uint8_t> & bytes, std::uint64_t receive_ns,
+    const UdpPeer & peer);
+  void on_frame_metadata(const std::vector<std::uint8_t> & bytes, std::uint64_t receive_ns,
+    const UdpPeer & peer);
+  void on_clock(const std::vector<std::uint8_t> & bytes, std::uint64_t receive_ns,
+    const UdpPeer & peer);
   void publish_frame();
   void notify_frame_ready();
   void delivery_loop();
   void publish_status();
   void publish_navigation(const TelemetryPacket & packet);
   void log_protocol_error(const std::string & category, const std::string & error);
+  bool accept_session_locked(const std::string & session, const std::string & logical_stream,
+    std::uint64_t sequence, const char * category);
   std::string dashboard_state() const;
+  void record_status_transition(const msg::TransportStatus & status);
 
   std::string bind_host_;
+  std::string android_clock_host_;
+  double clock_fresh_after_s_{3.0};
+  double primary_stale_after_s_{1.0};
   std::size_t max_json_bytes_;
   std::string primary_topic_;
   std::string context_topic_;
@@ -54,6 +66,7 @@ private:
   std::unique_ptr<UdpReceiver> clock_receiver_;
   std::unique_ptr<ClockPinger> clock_pinger_;
   std::unique_ptr<DashboardServer> dashboard_;
+  std::unique_ptr<SessionEvidenceWriter> evidence_writer_;
   FrameHandoff handoff_;
   std::unique_ptr<PrimaryVideoPipeline> video_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_publisher_;
@@ -67,10 +80,21 @@ private:
   bool delivery_pending_{false};
   bool delivery_stopping_{false};
   std::thread delivery_thread_;
-  std::mutex state_mutex_;
+  mutable std::mutex state_mutex_;
+  std::mutex evidence_state_mutex_;
   std::optional<TelemetryPacket> latest_telemetry_;
   std::optional<FrameMetadata> latest_metadata_;
+  std::optional<HealthPacket> latest_health_;
+  SessionTracker sessions_;
   SourceTimeState source_time_state_;
+  std::uint64_t last_metadata_receive_mono_ns_{0};
+  std::uint64_t metadata_count_{0};
+  std::uint64_t last_telemetry_receive_mono_ns_{0};
+  std::uint64_t telemetry_packet_count_{0};
+  std::uint64_t last_health_receive_mono_ns_{0};
+  std::uint64_t health_count_{0};
+  UdpPeer latest_telemetry_peer_;
+  UdpPeer latest_metadata_peer_;
   ClockMapper clock_mapper_;
   std::atomic<std::uint64_t> last_published_mono_ns_{0};
   std::atomic<std::uint64_t> published_count_{0};
@@ -84,6 +108,8 @@ private:
   std::atomic<double> decoded_fps_{0.0};
   std::atomic<double> published_fps_{0.0};
   std::atomic<double> superseded_frame_rate_{0.0};
+  PrimaryHealthEvaluator health_evaluator_{1.0, 2.0};
+  bool evidence_incident_active_{false};
 };
 
 }  // namespace dji_edge_transport

@@ -38,12 +38,14 @@ TEST(SourceTimeState, CombinesCausalFlightRtkAndGimbalSamples)
   flight.heading_deg = 4.0;
   dji_edge_transport::TelemetryPacket rtk;
   rtk.type = "rtk";
+  rtk.session = "s";
   rtk.android_mono_ns = 11;
   rtk.rtk_valid = true;
   rtk.latitude_deg = 10.0;
   rtk.longitude_deg = 20.0;
   dji_edge_transport::TelemetryPacket gimbal;
   gimbal.type = "gimbal";
+  gimbal.session = "s";
   gimbal.android_mono_ns = 12;
   gimbal.gimbal_pitch_valid = true;
   gimbal.gimbal_pitch_deg = -45.0;
@@ -91,4 +93,30 @@ TEST(SourceTimeState, DoesNotRegressOrLetRtkEraseFlightAltitudeAndHeading)
   EXPECT_DOUBLE_EQ(result->altitude_m, 3.0);
   EXPECT_DOUBLE_EQ(result->heading_deg, 4.0);
   EXPECT_FALSE(result->rtk_valid);
+}
+
+TEST(SourceTimeState, ResetPreventsOldSessionComposition)
+{
+  dji_edge_transport::SourceTimeState state(4);
+  dji_edge_transport::TelemetryPacket flight_a;
+  flight_a.type = "flight";
+  flight_a.session = "a";
+  flight_a.android_mono_ns = 10;
+  flight_a.position_valid = true;
+  dji_edge_transport::TelemetryPacket rtk_a;
+  rtk_a.type = "rtk";
+  rtk_a.session = "a";
+  rtk_a.android_mono_ns = 11;
+  rtk_a.rtk_valid = true;
+  state.add(flight_a);
+  state.add(rtk_a);
+  state.reset("b");
+  state.add(rtk_a);
+  EXPECT_FALSE(state.latest().has_value());
+  dji_edge_transport::TelemetryPacket flight_b = flight_a;
+  flight_b.session = "b";
+  flight_b.android_mono_ns = 20;
+  state.add(flight_b);
+  ASSERT_TRUE(state.latest().has_value());
+  EXPECT_FALSE(state.latest()->rtk_valid);
 }

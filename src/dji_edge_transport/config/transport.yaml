@@ -7,6 +7,7 @@
     android_clock_host: ""
     clock_ping_interval_s: 1.0
     clock_response_timeout_s: 0.5
+    clock_fresh_after_s: 3.0
     primary_rtp_port: 5600
     max_json_bytes: 1200
     rtp_payload_type: 96
@@ -17,5 +18,8 @@
     status_topic: "/dji/edge/transport_status"
     diagnostics_topic: "/dji/diagnostics"
     diagnostics_period_s: 1.0
+    primary_stale_after_s: 1.0
+    sender_correlation_s: 2.0
     dashboard_port: 8090
     dashboard_local_config: "/workspace/transport.local.yaml"
+    evidence_root: "/workspace/.runtime/evidence"

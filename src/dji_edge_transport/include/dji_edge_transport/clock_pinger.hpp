@@ -23,14 +23,18 @@ public:
   ClockPinger & operator=(const ClockPinger &) = delete;
   void start();
   void stop();
+  // Performs one bounded request/reply exchange. Public for deterministic local
+  // socket tests; normal runtime use remains start()/stop().
+  bool exchange_once();
   std::uint64_t attempts() const { return attempts_.load(); }
   std::uint64_t successes() const { return successes_.load(); }
   std::uint64_t timeouts() const { return timeouts_.load(); }
+  std::uint64_t last_success_mono_ns() const { return last_success_mono_ns_.load(); }
   std::string last_error() const;
 
 private:
   void run();
-  bool exchange_once();
+  bool exchange_on_socket(int socket_fd);
   std::string target_ipv4_;
   std::uint16_t target_port_;
   std::string session_;
@@ -43,6 +47,7 @@ private:
   std::atomic<std::uint64_t> attempts_{0};
   std::atomic<std::uint64_t> successes_{0};
   std::atomic<std::uint64_t> timeouts_{0};
+  std::atomic<std::uint64_t> last_success_mono_ns_{0};
   std::thread thread_;
   mutable std::mutex error_mutex_;
   std::string last_error_;

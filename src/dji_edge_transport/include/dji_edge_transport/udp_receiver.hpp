@@ -9,9 +9,14 @@
 
 namespace dji_edge_transport {
 
+struct UdpPeer {
+  std::string ipv4;
+  std::uint16_t port{0};
+};
+
 class UdpReceiver {
 public:
-  using Callback = std::function<void(const std::vector<std::uint8_t> &, std::uint64_t)>;
+  using Callback = std::function<void(const std::vector<std::uint8_t> &, std::uint64_t, const UdpPeer &)>;
 
   UdpReceiver(std::string bind_host, std::uint16_t port, std::size_t max_bytes, Callback callback);
   ~UdpReceiver();

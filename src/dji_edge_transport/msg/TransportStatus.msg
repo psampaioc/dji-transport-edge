@@ -8,6 +8,7 @@ uint8 DELIVERY_STALLED=6
 std_msgs/Header header
 uint8 state
 string state_reason
+string session
 bool ingress_seen
 float64 ingress_age_s
 float64 decoded_age_s
@@ -23,6 +24,18 @@ float64 decoded_fps
 float64 published_fps
 float64 ingress_bitrate_bps
 float64 superseded_frame_rate
+float64 metadata_age_s
+uint64 metadata_count
+float64 sender_health_age_s
+uint64 sender_health_count
+uint64 android_primary_video_callbacks
+uint64 android_primary_video_callback_drops
+uint64 android_primary_rtp_packets
+uint64 android_primary_access_units
+uint64 android_telemetry_queue_drops
+uint64 android_telemetry_socket_errors
+uint64 android_video_socket_errors
+bool rtp_header_continuity_available
 string decoder_backend
 string decoder_reason
 string pipeline_error

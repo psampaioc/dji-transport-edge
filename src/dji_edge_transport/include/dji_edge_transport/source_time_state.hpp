@@ -13,6 +13,7 @@ namespace dji_edge_transport {
 class SourceTimeState {
 public:
   explicit SourceTimeState(std::size_t capacity = 64);
+  void reset(std::string active_session);
   void add(TelemetryPacket packet);
   std::optional<TelemetryPacket> select_for_frame(std::uint64_t android_complete_mono_ns) const;
   std::optional<TelemetryPacket> latest() const;
@@ -23,6 +24,7 @@ private:
     const std::deque<TelemetryPacket> & samples, std::uint64_t android_mono_ns);
 
   std::size_t capacity_;
+  std::string active_session_;
   mutable std::mutex mutex_;
   std::map<std::string, std::deque<TelemetryPacket>> history_;
 };

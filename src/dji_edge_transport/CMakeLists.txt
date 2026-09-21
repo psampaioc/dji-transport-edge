@@ -27,6 +27,10 @@ add_library(dji_edge_transport_core
   src/transport_node.cpp
   src/protocol_decoder.cpp
   src/source_time_state.cpp
+  src/session_tracker.cpp
+  src/rtp_ingress_tracker.cpp
+  src/session_evidence_writer.cpp
+  src/primary_health_evaluator.cpp
   src/clock_mapper.cpp
   src/clock_pinger.cpp
   src/dashboard_server.cpp
@@ -57,6 +61,8 @@ if(BUILD_TESTING)
   target_include_directories(test_protocol_decoder PRIVATE include)
   target_link_libraries(test_protocol_decoder dji_edge_transport_core)
   ament_target_dependencies(test_protocol_decoder rclcpp)
+  target_compile_definitions(test_protocol_decoder PRIVATE
+    DJI_EDGE_TRANSPORT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   ament_add_gtest(test_frame_handoff test/test_frame_handoff.cpp)
   target_include_directories(test_frame_handoff PRIVATE include)
   target_link_libraries(test_frame_handoff dji_edge_transport_core)
@@ -70,13 +76,28 @@ if(BUILD_TESTING)
   ament_add_gtest(test_source_time_state test/test_source_time_state.cpp)
   target_include_directories(test_source_time_state PRIVATE include)
   target_link_libraries(test_source_time_state dji_edge_transport_core)
+  ament_add_gtest(test_session_tracker test/test_session_tracker.cpp)
+  target_include_directories(test_session_tracker PRIVATE include)
+  target_link_libraries(test_session_tracker dji_edge_transport_core)
   ament_add_gtest(test_clock_mapper test/test_clock_mapper.cpp)
   target_include_directories(test_clock_mapper PRIVATE include)
   target_link_libraries(test_clock_mapper dji_edge_transport_core)
+  ament_add_gtest(test_clock_pinger test/test_clock_pinger.cpp)
+  target_include_directories(test_clock_pinger PRIVATE include)
+  target_link_libraries(test_clock_pinger dji_edge_transport_core)
   ament_add_gtest(test_primary_video_pipeline test/test_primary_video_pipeline.cpp)
   target_include_directories(test_primary_video_pipeline PRIVATE include)
   target_link_libraries(test_primary_video_pipeline dji_edge_transport_core)
   ament_target_dependencies(test_primary_video_pipeline rclcpp)
+  ament_add_gtest(test_rtp_ingress_tracker test/test_rtp_ingress_tracker.cpp)
+  target_include_directories(test_rtp_ingress_tracker PRIVATE include)
+  target_link_libraries(test_rtp_ingress_tracker dji_edge_transport_core)
+  ament_add_gtest(test_session_evidence_writer test/test_session_evidence_writer.cpp)
+  target_include_directories(test_session_evidence_writer PRIVATE include)
+  target_link_libraries(test_session_evidence_writer dji_edge_transport_core)
+  ament_add_gtest(test_primary_health_evaluator test/test_primary_health_evaluator.cpp)
+  target_include_directories(test_primary_health_evaluator PRIVATE include)
+  target_link_libraries(test_primary_health_evaluator dji_edge_transport_core)
 endif()
 
 ament_export_dependencies(rosidl_default_runtime)

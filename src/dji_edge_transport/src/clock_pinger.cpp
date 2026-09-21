@@ -44,27 +44,40 @@ std::string ClockPinger::last_error() const
 
 void ClockPinger::run()
 {
+  const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (socket_fd < 0) {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    last_error_ = std::strerror(errno);
+    return;
+  }
   while (!stopping_.load()) {
-    exchange_once();
+    exchange_on_socket(socket_fd);
     const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(interval_s_);
     while (!stopping_.load() && std::chrono::steady_clock::now() < end) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   }
+  close(socket_fd);
 }
 
 bool ClockPinger::exchange_once()
 {
-  ++attempts_;
   const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
   if (socket_fd < 0) return false;
+  const bool result = exchange_on_socket(socket_fd);
+  close(socket_fd);
+  return result;
+}
+
+bool ClockPinger::exchange_on_socket(int socket_fd)
+{
+  ++attempts_;
   sockaddr_in target{};
   target.sin_family = AF_INET;
   target.sin_port = htons(target_port_);
   if (inet_pton(AF_INET, target_ipv4_.c_str(), &target.sin_addr) != 1) {
     std::lock_guard<std::mutex> lock(error_mutex_);
     last_error_ = "clock target must be an IPv4 literal";
-    close(socket_fd);
     return false;
   }
   const auto t0 = now_ns();
@@ -75,7 +88,6 @@ bool ClockPinger::exchange_once()
       reinterpret_cast<const sockaddr *>(&target), sizeof(target)) < 0) {
     std::lock_guard<std::mutex> lock(error_mutex_);
     last_error_ = std::strerror(errno);
-    close(socket_fd);
     return false;
   }
   timeval timeout{};
@@ -85,7 +97,6 @@ bool ClockPinger::exchange_once()
   std::vector<std::uint8_t> bytes(max_bytes_ + 1);
   const auto received = recvfrom(socket_fd, bytes.data(), bytes.size(), 0, nullptr, nullptr);
   const auto t3 = now_ns();
-  close(socket_fd);
   if (received < 0) {
     ++timeouts_;
     std::lock_guard<std::mutex> lock(error_mutex_);
@@ -101,6 +112,11 @@ bool ClockPinger::exchange_once()
     return false;
   }
   ++successes_;
+  last_success_mono_ns_.store(t3);
+  {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    last_error_.clear();
+  }
   if (callback_) callback_(*pong, t3);
   return true;
 }

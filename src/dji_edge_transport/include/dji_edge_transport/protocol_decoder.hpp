@@ -35,6 +35,27 @@ struct FrameMetadata {
   std::string dji_timestamp_source;
 };
 
+struct HealthPacket {
+  std::string session;
+  std::uint64_t sequence{0};
+  std::uint64_t android_mono_ns{0};
+  std::uint64_t primary_video_callbacks{0};
+  std::uint64_t primary_video_callback_drops{0};
+  std::uint64_t primary_rtp_packets{0};
+  std::uint64_t primary_access_units{0};
+  std::uint64_t telemetry_queue_drops{0};
+  std::uint64_t telemetry_socket_errors{0};
+  std::uint64_t video_socket_errors{0};
+  // The tablet may add these sender counters incrementally. Missing means
+  // "not reported", never zero, so the dashboard cannot imply false proof.
+  std::optional<std::uint64_t> primary_rtp_bytes;
+  std::optional<std::uint64_t> telemetry_datagrams;
+  std::optional<std::uint64_t> telemetry_bytes;
+  std::optional<std::uint64_t> metadata_datagrams;
+  std::optional<std::uint64_t> metadata_bytes;
+  std::optional<std::uint64_t> clock_pongs_sent;
+};
+
 struct ClockPacket {
   std::uint64_t t0_edge_send_mono_ns{0};
   std::uint64_t t1_android_rx_mono_ns{0};
@@ -45,6 +66,8 @@ struct ClockPacket {
 std::optional<TelemetryPacket> decode_telemetry(
   const std::vector<std::uint8_t> & bytes, std::size_t max_bytes, std::string & error);
 std::optional<FrameMetadata> decode_frame_metadata(
+  const std::vector<std::uint8_t> & bytes, std::size_t max_bytes, std::string & error);
+std::optional<HealthPacket> decode_health(
   const std::vector<std::uint8_t> & bytes, std::size_t max_bytes, std::string & error);
 std::optional<ClockPacket> decode_clock(
   const std::vector<std::uint8_t> & bytes, std::size_t max_bytes, std::string & error);
