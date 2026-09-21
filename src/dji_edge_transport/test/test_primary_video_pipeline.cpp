@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <gst/gst.h>
+
 #include <atomic>
 #include <array>
 
@@ -61,4 +63,34 @@ TEST(PrimaryVideoPipeline, FormatsPipelineErrorWithSourceAndBoundedDebug)
   EXPECT_NE(error.find("GStreamer [udpsrc0]: Internal data stream error."), std::string::npos);
   EXPECT_NE(error.find("[truncated]"), std::string::npos);
   EXPECT_EQ(error.find('\n'), std::string::npos);
+}
+
+TEST(PrimaryVideoPipeline, AccumulatesOnlyDocumentedJitterbufferDropMessages)
+{
+  auto * valid = gst_structure_new("drop-msg",
+      "num-too-late", G_TYPE_UINT64, static_cast<guint64>(3),
+      "num-drop-on-latency", G_TYPE_UINT64, static_cast<guint64>(5),
+      nullptr);
+  dji_edge_transport::JitterbufferDropSnapshot snapshot;
+
+  EXPECT_TRUE(dji_edge_transport::observe_jitterbuffer_drop_message(valid, snapshot));
+  EXPECT_EQ(snapshot.message_count, 1u);
+  EXPECT_EQ(snapshot.too_late_count, 3u);
+  EXPECT_EQ(snapshot.drop_on_latency_count, 5u);
+
+  auto * incomplete = gst_structure_new("drop-msg",
+      "num-too-late", G_TYPE_UINT64, static_cast<guint64>(1),
+      nullptr);
+  EXPECT_FALSE(dji_edge_transport::observe_jitterbuffer_drop_message(incomplete, snapshot));
+  EXPECT_EQ(snapshot.message_count, 1u);
+
+  auto * unrelated = gst_structure_new_empty("unrelated");
+  EXPECT_FALSE(dji_edge_transport::observe_jitterbuffer_drop_message(unrelated, snapshot));
+  EXPECT_EQ(snapshot.message_count, 1u);
+  EXPECT_EQ(snapshot.too_late_count, 3u);
+  EXPECT_EQ(snapshot.drop_on_latency_count, 5u);
+
+  gst_structure_free(valid);
+  gst_structure_free(incomplete);
+  gst_structure_free(unrelated);
 }

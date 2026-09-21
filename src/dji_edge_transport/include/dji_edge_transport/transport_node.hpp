@@ -27,6 +27,11 @@
 
 namespace dji_edge_transport {
 
+constexpr std::uint64_t counter_window_delta(std::uint64_t current, std::uint64_t previous)
+{
+  return current >= previous ? current - previous : 0;
+}
+
 class TransportNode : public rclcpp::Node {
 public:
   TransportNode();
@@ -100,14 +105,33 @@ private:
   std::atomic<std::uint64_t> published_count_{0};
   std::uint64_t publish_error_count_{0};
   std::uint64_t last_rate_mono_ns_{0};
+  std::uint64_t last_rate_ingress_packets_{0};
   std::uint64_t last_rate_ingress_bytes_{0};
   std::uint64_t last_rate_decoded_count_{0};
   std::uint64_t last_rate_published_count_{0};
   std::uint64_t last_rate_dropped_count_{0};
+  std::uint64_t last_rate_rtp_sequence_gaps_{0};
+  std::uint64_t last_rate_rtp_duplicates_{0};
+  std::uint64_t last_rate_rtp_reordered_{0};
+  std::uint64_t last_rate_rtp_malformed_headers_{0};
+  std::uint64_t last_rate_jitterbuffer_messages_{0};
+  std::uint64_t last_rate_jitterbuffer_too_late_{0};
+  std::uint64_t last_rate_jitterbuffer_drop_on_latency_{0};
+  std::uint64_t last_rate_jitterbuffer_malformed_{0};
   std::atomic<double> ingress_bitrate_bps_{0.0};
   std::atomic<double> decoded_fps_{0.0};
   std::atomic<double> published_fps_{0.0};
   std::atomic<double> superseded_frame_rate_{0.0};
+  std::atomic<std::uint64_t> ingress_packets_window_{0};
+  std::atomic<std::uint64_t> ingress_bytes_window_{0};
+  std::atomic<std::uint64_t> rtp_sequence_gaps_window_{0};
+  std::atomic<std::uint64_t> rtp_duplicates_window_{0};
+  std::atomic<std::uint64_t> rtp_reordered_window_{0};
+  std::atomic<std::uint64_t> rtp_malformed_headers_window_{0};
+  std::atomic<std::uint64_t> jitterbuffer_messages_window_{0};
+  std::atomic<std::uint64_t> jitterbuffer_too_late_window_{0};
+  std::atomic<std::uint64_t> jitterbuffer_drop_on_latency_window_{0};
+  std::atomic<std::uint64_t> jitterbuffer_malformed_window_{0};
   PrimaryHealthEvaluator health_evaluator_{1.0, 2.0};
   bool evidence_incident_active_{false};
 };

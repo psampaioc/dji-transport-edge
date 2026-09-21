@@ -46,6 +46,7 @@ void ClockPinger::run()
 {
   const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
   if (socket_fd < 0) {
+    ++send_failures_;
     std::lock_guard<std::mutex> lock(error_mutex_);
     last_error_ = std::strerror(errno);
     return;
@@ -63,7 +64,12 @@ void ClockPinger::run()
 bool ClockPinger::exchange_once()
 {
   const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-  if (socket_fd < 0) return false;
+  if (socket_fd < 0) {
+    ++send_failures_;
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    last_error_ = std::strerror(errno);
+    return false;
+  }
   const bool result = exchange_on_socket(socket_fd);
   close(socket_fd);
   return result;
@@ -76,6 +82,7 @@ bool ClockPinger::exchange_on_socket(int socket_fd)
   target.sin_family = AF_INET;
   target.sin_port = htons(target_port_);
   if (inet_pton(AF_INET, target_ipv4_.c_str(), &target.sin_addr) != 1) {
+    ++send_failures_;
     std::lock_guard<std::mutex> lock(error_mutex_);
     last_error_ = "clock target must be an IPv4 literal";
     return false;
@@ -86,6 +93,7 @@ bool ClockPinger::exchange_on_socket(int socket_fd)
       {"t0_edge_send_mono_ns", t0}}.dump();
   if (sendto(socket_fd, packet.data(), packet.size(), 0,
       reinterpret_cast<const sockaddr *>(&target), sizeof(target)) < 0) {
+    ++send_failures_;
     std::lock_guard<std::mutex> lock(error_mutex_);
     last_error_ = std::strerror(errno);
     return false;
@@ -98,21 +106,30 @@ bool ClockPinger::exchange_on_socket(int socket_fd)
   const auto received = recvfrom(socket_fd, bytes.data(), bytes.size(), 0, nullptr, nullptr);
   const auto t3 = now_ns();
   if (received < 0) {
-    ++timeouts_;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) ++timeouts_;
+    else ++receive_failures_;
     std::lock_guard<std::mutex> lock(error_mutex_);
-    last_error_ = "clock timeout";
+    last_error_ = errno == EAGAIN || errno == EWOULDBLOCK ? "clock timeout" : std::strerror(errno);
     return false;
   }
   std::string error;
   bytes.resize(static_cast<std::size_t>(received));
   const auto pong = decode_clock(bytes, max_bytes_, error);
-  if (!pong || !pong->is_pong || pong->t0_edge_send_mono_ns != t0) {
+  if (!pong) {
+    ++decode_failures_;
     std::lock_guard<std::mutex> lock(error_mutex_);
-    last_error_ = pong ? "unmatched clock pong" : error;
+    last_error_ = error;
+    return false;
+  }
+  if (!pong->is_pong || pong->t0_edge_send_mono_ns != t0) {
+    ++unmatched_pongs_;
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    last_error_ = "unmatched clock pong";
     return false;
   }
   ++successes_;
   last_success_mono_ns_.store(t3);
+  last_rtt_ns_.store(t3 - t0);
   {
     std::lock_guard<std::mutex> lock(error_mutex_);
     last_error_.clear();

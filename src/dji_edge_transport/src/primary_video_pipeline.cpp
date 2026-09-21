@@ -12,6 +12,21 @@ namespace dji_edge_transport {
 namespace {
 constexpr std::size_t kMaximumGstreamerDebugBytes = 1024;
 
+bool unsigned_structure_field(const GstStructure * structure, const char * name, std::uint64_t & result)
+{
+  const auto * value = gst_structure_get_value(structure, name);
+  if (!value) return false;
+  if (G_VALUE_HOLDS_UINT64(value)) {
+    result = g_value_get_uint64(value);
+    return true;
+  }
+  if (G_VALUE_HOLDS_UINT(value)) {
+    result = g_value_get_uint(value);
+    return true;
+  }
+  return false;
+}
+
 std::uint64_t now_ns()
 {
   return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -64,6 +79,23 @@ GstPadProbeReturn on_source_buffer(GstPad *, GstPadProbeInfo * info, gpointer us
 }
 }
 
+bool observe_jitterbuffer_drop_message(
+  const GstStructure * structure, JitterbufferDropSnapshot & snapshot)
+{
+  if (!structure || g_strcmp0(gst_structure_get_name(structure), "drop-msg") != 0) return false;
+  std::uint64_t too_late = 0;
+  std::uint64_t drop_on_latency = 0;
+  if (!unsigned_structure_field(structure, "num-too-late", too_late) ||
+    !unsigned_structure_field(structure, "num-drop-on-latency", drop_on_latency))
+  {
+    return false;
+  }
+  ++snapshot.message_count;
+  snapshot.too_late_count += too_late;
+  snapshot.drop_on_latency_count += drop_on_latency;
+  return true;
+}
+
 std::string format_gstreamer_error(
   const std::string & source, const std::string & message, const std::string & debug)
 {
@@ -99,7 +131,8 @@ std::string PrimaryVideoPipeline::description(const std::string & decoder) const
   std::ostringstream graph;
   graph << "udpsrc name=primary_source address=" << bind_host_ << " port=" << port_
         << " caps=application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=" << payload_type_
-        << " ! rtpjitterbuffer latency=" << latency_ms_ << " drop-on-latency=true do-lost=true"
+        << " ! rtpjitterbuffer name=primary_jitterbuffer latency=" << latency_ms_
+        << " drop-on-latency=true do-lost=true post-drop-messages=true drop-messages-interval=1000"
         << " ! rtph264depay wait-for-keyframe=true request-keyframe=true ! h264parse ! " << decoder
         << " ! videoconvert ! video/x-raw,format=BGR ! appsink name=primary_sink emit-signals=false"
         << " max-buffers=1 drop=true sync=false";
@@ -188,7 +221,8 @@ void PrimaryVideoPipeline::set_error(const std::string & error)
 void PrimaryVideoPipeline::poll_bus()
 {
   if (!bus_ || closed_.load()) return;
-  while (auto * message = gst_bus_pop_filtered(bus_, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS))) {
+  while (auto * message = gst_bus_pop_filtered(
+      bus_, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS | GST_MESSAGE_ELEMENT))) {
     if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
       GError * error = nullptr;
       gchar * debug = nullptr;
@@ -199,8 +233,16 @@ void PrimaryVideoPipeline::poll_bus()
         debug ? debug : ""));
       if (error) g_error_free(error);
       if (debug) g_free(debug);
-    } else {
+    } else if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS) {
       set_error("GStreamer EOS");
+    } else {
+      const auto * source = GST_MESSAGE_SRC(message);
+      if (source && g_strcmp0(GST_OBJECT_NAME(source), "primary_jitterbuffer") == 0) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!observe_jitterbuffer_drop_message(gst_message_get_structure(message), jitterbuffer_)) {
+          ++jitterbuffer_.malformed_message_count;
+        }
+      }
     }
     gst_message_unref(message);
   }
@@ -231,6 +273,7 @@ VideoSnapshot PrimaryVideoPipeline::snapshot() const
   snapshot.last_decoded_mono_ns = last_decoded_mono_ns_;
   snapshot.decoded_count = decoded_count_;
   snapshot.rtp = rtp_tracker_.snapshot();
+  snapshot.jitterbuffer = jitterbuffer_;
   snapshot.ingress_packet_count = ingress_packet_count_;
   snapshot.ingress_byte_count = ingress_byte_count_;
   snapshot.width = width_;

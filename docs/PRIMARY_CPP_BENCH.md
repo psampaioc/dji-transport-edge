@@ -19,9 +19,10 @@ This proves the `dji_edge_transport` path.
    Add `rviz:=false` for a headless bench.
 3. Open `http://127.0.0.1:8090`. It separately reports Android-local health,
    metadata receipt, RTP ingress bitrate/datagrams/bytes, RTP header continuity,
-   decode and publish FPS/ages, superseded-frame rate, resolution, decoder,
-   bounded evidence and clock state. Saving the tablet clock IPv4 affects the
-   next launch; it never restarts the stack automatically.
+   jitterbuffer drop totals and one-status-window deltas, decode and publish
+   FPS/ages, superseded-frame rate, resolution, decoder, bounded evidence and
+   clock outcomes. Saving the tablet clock IPv4 affects the next launch; it
+   never restarts the stack automatically.
 4. For at least 60 seconds, verify all of the following advance or remain
    healthy:
 
@@ -40,7 +41,8 @@ This proves the `dji_edge_transport` path.
    RViz. Fresh Android health with stale Edge RTP is an explicitly qualified
    ingress gap, not proven Wi-Fi loss.
    A clock exchange is optional to video/navigation but, when configured, must
-   show a positive successful sample count.
+   show a positive successful sample count. Distinguish clock send failures,
+   timeouts, invalid replies and unmatched replies; none changes video state.
 
 6. Run a controlled, props-off interruption: disable Android transport (or
    isolate the receiver) briefly, then restore it. The active session evidence
@@ -55,7 +57,8 @@ This proves the `dji_edge_transport` path.
    session NDJSON. The result passes only if Primary stays current, or every
    interruption is represented by bounded incident/recovery evidence with no
    queue growth, disk runaway, dashboard disruption or unreported pipeline
-   error.
+   error. A positive jitterbuffer or RTP-window delta is an observation at the
+   Edge, not proof that Wi-Fi caused the loss.
 
 Frame contexts intentionally report `ASSOCIATION_UNAVAILABLE` in this build.
 This is the safe result until a deterministic Android AU-to-decoded-frame key

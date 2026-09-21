@@ -29,7 +29,12 @@ public:
   std::uint64_t attempts() const { return attempts_.load(); }
   std::uint64_t successes() const { return successes_.load(); }
   std::uint64_t timeouts() const { return timeouts_.load(); }
+  std::uint64_t send_failures() const { return send_failures_.load(); }
+  std::uint64_t receive_failures() const { return receive_failures_.load(); }
+  std::uint64_t decode_failures() const { return decode_failures_.load(); }
+  std::uint64_t unmatched_pongs() const { return unmatched_pongs_.load(); }
   std::uint64_t last_success_mono_ns() const { return last_success_mono_ns_.load(); }
+  std::uint64_t last_rtt_ns() const { return last_rtt_ns_.load(); }
   std::string last_error() const;
 
 private:
@@ -47,7 +52,12 @@ private:
   std::atomic<std::uint64_t> attempts_{0};
   std::atomic<std::uint64_t> successes_{0};
   std::atomic<std::uint64_t> timeouts_{0};
+  std::atomic<std::uint64_t> send_failures_{0};
+  std::atomic<std::uint64_t> receive_failures_{0};
+  std::atomic<std::uint64_t> decode_failures_{0};
+  std::atomic<std::uint64_t> unmatched_pongs_{0};
   std::atomic<std::uint64_t> last_success_mono_ns_{0};
+  std::atomic<std::uint64_t> last_rtt_ns_{0};
   std::thread thread_;
   mutable std::mutex error_mutex_;
   std::string last_error_;

@@ -65,6 +65,40 @@ TEST(ClockPinger, AcceptsPongFromEphemeralSourcePort)
   EXPECT_EQ(pinger.successes(), 1u);
   EXPECT_EQ(pinger.timeouts(), 0u);
   EXPECT_GT(pinger.last_success_mono_ns(), 0u);
+  EXPECT_GT(pinger.last_rtt_ns(), 0u);
+  EXPECT_EQ(pinger.send_failures(), 0u);
+  EXPECT_EQ(pinger.decode_failures(), 0u);
+  EXPECT_EQ(pinger.unmatched_pongs(), 0u);
+}
+
+TEST(ClockPinger, SeparatesInvalidDestinationFromTimeout)
+{
+  dji_edge_transport::ClockPinger invalid("not-an-ipv4", 5502, "edge-test", 1.0, 0.01, 1200, {});
+  EXPECT_FALSE(invalid.exchange_once());
+  EXPECT_EQ(invalid.attempts(), 1u);
+  EXPECT_EQ(invalid.send_failures(), 1u);
+  EXPECT_EQ(invalid.timeouts(), 0u);
+  EXPECT_EQ(invalid.decode_failures(), 0u);
+  EXPECT_EQ(invalid.unmatched_pongs(), 0u);
+
+  SocketGuard server(socket(AF_INET, SOCK_DGRAM, 0));
+  ASSERT_GE(server.get(), 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(bind(server.get(), reinterpret_cast<const sockaddr *>(&address), sizeof(address)), 0);
+  socklen_t address_size = sizeof(address);
+  ASSERT_EQ(getsockname(server.get(), reinterpret_cast<sockaddr *>(&address), &address_size), 0);
+
+  dji_edge_transport::ClockPinger timeout("127.0.0.1", ntohs(address.sin_port), "edge-test",
+    1.0, 0.01, 1200, {});
+  EXPECT_FALSE(timeout.exchange_once());
+  EXPECT_EQ(timeout.attempts(), 1u);
+  EXPECT_EQ(timeout.send_failures(), 0u);
+  EXPECT_EQ(timeout.timeouts(), 1u);
+  EXPECT_EQ(timeout.decode_failures(), 0u);
+  EXPECT_EQ(timeout.unmatched_pongs(), 0u);
 }
 
 TEST(ClockPinger, BackgroundProbesReuseOneSourcePort)

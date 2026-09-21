@@ -12,13 +12,27 @@
 
 struct _GstElement;
 struct _GstBus;
+struct _GstStructure;
 using GstElement = _GstElement;
 using GstBus = _GstBus;
+using GstStructure = _GstStructure;
 
 namespace dji_edge_transport {
 
 std::string format_gstreamer_error(
   const std::string & source, const std::string & message, const std::string & debug);
+
+struct JitterbufferDropSnapshot {
+  std::uint64_t message_count{0};
+  std::uint64_t too_late_count{0};
+  std::uint64_t drop_on_latency_count{0};
+  std::uint64_t malformed_message_count{0};
+};
+
+// Parses scalar fields from GStreamer's documented jitterbuffer drop-msg only.
+// It never retains media data or a GstMessage beyond the caller's scope.
+bool observe_jitterbuffer_drop_message(
+  const GstStructure * structure, JitterbufferDropSnapshot & snapshot);
 
 struct VideoSnapshot {
   std::uint64_t last_rtp_mono_ns{0};
@@ -27,6 +41,7 @@ struct VideoSnapshot {
   std::uint64_t ingress_byte_count{0};
   std::uint64_t decoded_count{0};
   RtpIngressSnapshot rtp;
+  JitterbufferDropSnapshot jitterbuffer;
   std::uint32_t width{0};
   std::uint32_t height{0};
   std::string decoder_backend{"cpu"};
@@ -73,6 +88,7 @@ private:
   std::uint64_t ingress_packet_count_{0};
   std::uint64_t ingress_byte_count_{0};
   RtpIngressTracker rtp_tracker_;
+  JitterbufferDropSnapshot jitterbuffer_;
   std::uint32_t width_{0};
   std::uint32_t height_{0};
   std::string decoder_backend_{"cpu"};

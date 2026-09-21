@@ -347,6 +347,15 @@ void TransportNode::publish_status()
   status.dropped_old_frame_count = handoff_.dropped_old_frames();
   status.ingress_packet_count = snapshot.ingress_packet_count;
   status.ingress_byte_count = snapshot.ingress_byte_count;
+  status.rtp_header_continuity_available = snapshot.rtp.header_continuity_available;
+  status.rtp_sequence_gap_count = snapshot.rtp.sequence_gap_count;
+  status.rtp_duplicate_count = snapshot.rtp.duplicate_count;
+  status.rtp_reordered_count = snapshot.rtp.reordered_count;
+  status.rtp_malformed_header_count = snapshot.rtp.malformed_header_count;
+  status.jitterbuffer_drop_message_count = snapshot.jitterbuffer.message_count;
+  status.jitterbuffer_too_late_count = snapshot.jitterbuffer.too_late_count;
+  status.jitterbuffer_drop_on_latency_count = snapshot.jitterbuffer.drop_on_latency_count;
+  status.jitterbuffer_malformed_message_count = snapshot.jitterbuffer.malformed_message_count;
   status.width = snapshot.width;
   status.height = snapshot.height;
   status.decoder_backend = snapshot.decoder_backend;
@@ -364,19 +373,58 @@ void TransportNode::publish_status()
     status.clock_attempt_count = clock_pinger_->attempts();
     status.clock_success_count = clock_pinger_->successes();
     status.clock_timeout_count = clock_pinger_->timeouts();
+    status.clock_send_failure_count = clock_pinger_->send_failures();
+    status.clock_receive_failure_count = clock_pinger_->receive_failures();
+    status.clock_decode_failure_count = clock_pinger_->decode_failures();
+    status.clock_unmatched_pong_count = clock_pinger_->unmatched_pongs();
+    status.clock_last_rtt_ns = clock_pinger_->last_rtt_ns();
     status.clock_error = clock_pinger_->last_error();
   }
   if (last_rate_mono_ns_ != 0 && current > last_rate_mono_ns_) {
     const auto seconds = static_cast<double>(current - last_rate_mono_ns_) / 1e9;
-    ingress_bitrate_bps_.store(static_cast<double>(snapshot.ingress_byte_count - last_rate_ingress_bytes_) * 8.0 / seconds);
-    decoded_fps_.store(static_cast<double>(snapshot.decoded_count - last_rate_decoded_count_) / seconds);
-    published_fps_.store(static_cast<double>(published_count_.load() - last_rate_published_count_) / seconds);
-    superseded_frame_rate_.store(static_cast<double>(status.dropped_old_frame_count - last_rate_dropped_count_) / seconds);
+    ingress_bitrate_bps_.store(static_cast<double>(
+        counter_window_delta(snapshot.ingress_byte_count, last_rate_ingress_bytes_)) * 8.0 / seconds);
+    decoded_fps_.store(static_cast<double>(
+        counter_window_delta(snapshot.decoded_count, last_rate_decoded_count_)) / seconds);
+    published_fps_.store(static_cast<double>(
+        counter_window_delta(published_count_.load(), last_rate_published_count_)) / seconds);
+    superseded_frame_rate_.store(static_cast<double>(
+        counter_window_delta(status.dropped_old_frame_count, last_rate_dropped_count_)) / seconds);
+    ingress_packets_window_.store(counter_window_delta(
+        snapshot.ingress_packet_count, last_rate_ingress_packets_));
+    ingress_bytes_window_.store(counter_window_delta(
+        snapshot.ingress_byte_count, last_rate_ingress_bytes_));
+    rtp_sequence_gaps_window_.store(counter_window_delta(
+        snapshot.rtp.sequence_gap_count, last_rate_rtp_sequence_gaps_));
+    rtp_duplicates_window_.store(counter_window_delta(
+        snapshot.rtp.duplicate_count, last_rate_rtp_duplicates_));
+    rtp_reordered_window_.store(counter_window_delta(
+        snapshot.rtp.reordered_count, last_rate_rtp_reordered_));
+    rtp_malformed_headers_window_.store(counter_window_delta(
+        snapshot.rtp.malformed_header_count, last_rate_rtp_malformed_headers_));
+    jitterbuffer_messages_window_.store(counter_window_delta(
+        snapshot.jitterbuffer.message_count, last_rate_jitterbuffer_messages_));
+    jitterbuffer_too_late_window_.store(counter_window_delta(
+        snapshot.jitterbuffer.too_late_count, last_rate_jitterbuffer_too_late_));
+    jitterbuffer_drop_on_latency_window_.store(counter_window_delta(
+        snapshot.jitterbuffer.drop_on_latency_count, last_rate_jitterbuffer_drop_on_latency_));
+    jitterbuffer_malformed_window_.store(counter_window_delta(
+        snapshot.jitterbuffer.malformed_message_count, last_rate_jitterbuffer_malformed_));
   }
   status.ingress_bitrate_bps = ingress_bitrate_bps_.load();
   status.decoded_fps = decoded_fps_.load();
   status.published_fps = published_fps_.load();
   status.superseded_frame_rate = superseded_frame_rate_.load();
+  status.ingress_packet_window = ingress_packets_window_.load();
+  status.ingress_byte_window = ingress_bytes_window_.load();
+  status.rtp_sequence_gap_window = rtp_sequence_gaps_window_.load();
+  status.rtp_duplicate_window = rtp_duplicates_window_.load();
+  status.rtp_reordered_window = rtp_reordered_window_.load();
+  status.rtp_malformed_header_window = rtp_malformed_headers_window_.load();
+  status.jitterbuffer_drop_message_window = jitterbuffer_messages_window_.load();
+  status.jitterbuffer_too_late_window = jitterbuffer_too_late_window_.load();
+  status.jitterbuffer_drop_on_latency_window = jitterbuffer_drop_on_latency_window_.load();
+  status.jitterbuffer_malformed_message_window = jitterbuffer_malformed_window_.load();
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     status.session = sessions_.active_session();
@@ -394,12 +442,20 @@ void TransportNode::publish_status()
       status.android_video_socket_errors = latest_health_->video_socket_errors;
     }
   }
-  status.rtp_header_continuity_available = snapshot.rtp.header_continuity_available;
   last_rate_mono_ns_ = current;
+  last_rate_ingress_packets_ = snapshot.ingress_packet_count;
   last_rate_ingress_bytes_ = snapshot.ingress_byte_count;
   last_rate_decoded_count_ = snapshot.decoded_count;
   last_rate_published_count_ = published_count_.load();
   last_rate_dropped_count_ = status.dropped_old_frame_count;
+  last_rate_rtp_sequence_gaps_ = snapshot.rtp.sequence_gap_count;
+  last_rate_rtp_duplicates_ = snapshot.rtp.duplicate_count;
+  last_rate_rtp_reordered_ = snapshot.rtp.reordered_count;
+  last_rate_rtp_malformed_headers_ = snapshot.rtp.malformed_header_count;
+  last_rate_jitterbuffer_messages_ = snapshot.jitterbuffer.message_count;
+  last_rate_jitterbuffer_too_late_ = snapshot.jitterbuffer.too_late_count;
+  last_rate_jitterbuffer_drop_on_latency_ = snapshot.jitterbuffer.drop_on_latency_count;
+  last_rate_jitterbuffer_malformed_ = snapshot.jitterbuffer.malformed_message_count;
   const auto assessment = health_evaluator_.evaluate({status.ingress_seen, status.ingress_age_s,
       status.decoded_age_s, status.published_age_s, status.sender_health_age_s,
       status.metadata_age_s, status.pipeline_error});
@@ -440,7 +496,23 @@ void TransportNode::record_status_transition(const msg::TransportStatus & status
     {"ingress_age_s", status.ingress_age_s}, {"metadata_age_s", status.metadata_age_s},
     {"decoded_age_s", status.decoded_age_s}, {"published_age_s", status.published_age_s},
     {"sender_health_age_s", status.sender_health_age_s},
-    {"rtp_header_continuity_available", status.rtp_header_continuity_available}};
+    {"rtp_header_continuity_available", status.rtp_header_continuity_available},
+    {"ingress_packet_window", status.ingress_packet_window},
+    {"ingress_byte_window", status.ingress_byte_window},
+    {"rtp_sequence_gap_count", status.rtp_sequence_gap_count},
+    {"rtp_sequence_gap_window", status.rtp_sequence_gap_window},
+    {"rtp_duplicate_count", status.rtp_duplicate_count},
+    {"rtp_duplicate_window", status.rtp_duplicate_window},
+    {"rtp_reordered_count", status.rtp_reordered_count},
+    {"rtp_reordered_window", status.rtp_reordered_window},
+    {"rtp_malformed_header_count", status.rtp_malformed_header_count},
+    {"rtp_malformed_header_window", status.rtp_malformed_header_window},
+    {"jitterbuffer_drop_message_count", status.jitterbuffer_drop_message_count},
+    {"jitterbuffer_drop_message_window", status.jitterbuffer_drop_message_window},
+    {"jitterbuffer_too_late_count", status.jitterbuffer_too_late_count},
+    {"jitterbuffer_too_late_window", status.jitterbuffer_too_late_window},
+    {"jitterbuffer_drop_on_latency_count", status.jitterbuffer_drop_on_latency_count},
+    {"jitterbuffer_drop_on_latency_window", status.jitterbuffer_drop_on_latency_window}};
   evidence_writer_->record(status.session, event.dump());
   evidence_incident_active_ = incident;
 }
@@ -523,6 +595,20 @@ std::string TransportNode::dashboard_state() const
     {"rtp_header_continuity_available", snapshot.rtp.header_continuity_available},
     {"rtp_sequence_gaps", snapshot.rtp.sequence_gap_count}, {"rtp_duplicates", snapshot.rtp.duplicate_count},
     {"rtp_reordered", snapshot.rtp.reordered_count}, {"rtp_malformed_headers", snapshot.rtp.malformed_header_count},
+    {"ingress_packets_window", ingress_packets_window_.load()},
+    {"ingress_bytes_window", ingress_bytes_window_.load()},
+    {"rtp_sequence_gaps_window", rtp_sequence_gaps_window_.load()},
+    {"rtp_duplicates_window", rtp_duplicates_window_.load()},
+    {"rtp_reordered_window", rtp_reordered_window_.load()},
+    {"rtp_malformed_headers_window", rtp_malformed_headers_window_.load()},
+    {"jitterbuffer_drop_messages", snapshot.jitterbuffer.message_count},
+    {"jitterbuffer_too_late", snapshot.jitterbuffer.too_late_count},
+    {"jitterbuffer_drop_on_latency", snapshot.jitterbuffer.drop_on_latency_count},
+    {"jitterbuffer_malformed_messages", snapshot.jitterbuffer.malformed_message_count},
+    {"jitterbuffer_drop_messages_window", jitterbuffer_messages_window_.load()},
+    {"jitterbuffer_too_late_window", jitterbuffer_too_late_window_.load()},
+    {"jitterbuffer_drop_on_latency_window", jitterbuffer_drop_on_latency_window_.load()},
+    {"jitterbuffer_malformed_messages_window", jitterbuffer_malformed_window_.load()},
     {"decoder", snapshot.decoder_backend}, {"decoder_reason", snapshot.decoder_reason}, {"pipeline_error", snapshot.pipeline_error}});
   const auto state = !snapshot.pipeline_error.empty() ? "pipeline_error" :
     snapshot.last_rtp_mono_ns == 0 ? "waiting_for_udp" : snapshot.decoded_count == 0 ?
@@ -538,6 +624,11 @@ std::string TransportNode::dashboard_state() const
       {"attempts", clock_pinger_ ? clock_pinger_->attempts() : 0},
       {"successes", clock_pinger_ ? clock_pinger_->successes() : 0},
       {"timeouts", clock_pinger_ ? clock_pinger_->timeouts() : 0},
+      {"send_failures", clock_pinger_ ? clock_pinger_->send_failures() : 0},
+      {"receive_failures", clock_pinger_ ? clock_pinger_->receive_failures() : 0},
+      {"decode_failures", clock_pinger_ ? clock_pinger_->decode_failures() : 0},
+      {"unmatched_pongs", clock_pinger_ ? clock_pinger_->unmatched_pongs() : 0},
+      {"last_rtt_ns", clock_pinger_ ? clock_pinger_->last_rtt_ns() : 0},
       {"error", clock_pinger_ ? clock_pinger_->last_error() : ""}}}};
   return result.dump();
 }
