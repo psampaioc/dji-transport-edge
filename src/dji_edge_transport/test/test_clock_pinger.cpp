@@ -101,6 +101,53 @@ TEST(ClockPinger, SeparatesInvalidDestinationFromTimeout)
   EXPECT_EQ(timeout.unmatched_pongs(), 0u);
 }
 
+TEST(ClockPinger, SeparatesMalformedFromUnmatchedPongs)
+{
+  SocketGuard server(socket(AF_INET, SOCK_DGRAM, 0));
+  ASSERT_GE(server.get(), 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(bind(server.get(), reinterpret_cast<const sockaddr *>(&address), sizeof(address)), 0);
+  socklen_t address_size = sizeof(address);
+  ASSERT_EQ(getsockname(server.get(), reinterpret_cast<sockaddr *>(&address), &address_size), 0);
+
+  std::thread responder([&]() {
+    for (int index = 0; index < 2; ++index) {
+      std::array<char, 1200> buffer{};
+      sockaddr_in client{};
+      socklen_t client_size = sizeof(client);
+      const auto received = recvfrom(server.get(), buffer.data(), buffer.size(), 0,
+        reinterpret_cast<sockaddr *>(&client), &client_size);
+      if (received <= 0) return;
+      std::string reply;
+      if (index == 0) {
+        reply = "{}";
+      } else {
+        const auto ping = nlohmann::json::parse(buffer.data(), buffer.data() + received);
+        reply = nlohmann::json{{"v", 1}, {"type", "clock_pong"},
+          {"session", ping.at("session")}, {"stream", "clock"}, {"seq", ping.at("seq")},
+          {"t0_edge_send_mono_ns", ping.at("t0_edge_send_mono_ns").get<std::uint64_t>() + 1},
+          {"t1_android_rx_mono_ns", 200ULL}, {"t2_android_tx_mono_ns", 210ULL}}.dump();
+      }
+      sendto(server.get(), reply.data(), reply.size(), 0,
+        reinterpret_cast<const sockaddr *>(&client), client_size);
+    }
+  });
+
+  dji_edge_transport::ClockPinger pinger("127.0.0.1", ntohs(address.sin_port), "edge-test",
+    1.0, 0.5, 1200, {});
+  EXPECT_FALSE(pinger.exchange_once());
+  EXPECT_FALSE(pinger.exchange_once());
+  responder.join();
+  EXPECT_EQ(pinger.successes(), 0u);
+  EXPECT_EQ(pinger.timeouts(), 0u);
+  EXPECT_EQ(pinger.decode_failures(), 1u);
+  EXPECT_EQ(pinger.unmatched_pongs(), 1u);
+  EXPECT_EQ(pinger.last_error(), "unmatched clock pong");
+}
+
 TEST(ClockPinger, BackgroundProbesReuseOneSourcePort)
 {
   SocketGuard server(socket(AF_INET, SOCK_DGRAM, 0));
