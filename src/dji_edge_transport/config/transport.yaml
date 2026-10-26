@@ -15,6 +15,9 @@
     primary_topic: "/dji/primary/image_raw"
     primary_context_topic: "/dji/primary/frame_context"
     navigation_topic: "/dji/navigation/state"
+    flight_topic: "/dji/telemetry/flight"
+    rtk_topic: "/dji/telemetry/rtk"
+    gimbal_topic: "/dji/telemetry/gimbal"
     status_topic: "/dji/edge/transport_status"
     diagnostics_topic: "/dji/diagnostics"
     diagnostics_period_s: 1.0

@@ -19,6 +19,7 @@ pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TransportStatus.msg"
   "msg/NavigationState.msg"
+  "msg/TelemetrySourceState.msg"
   "msg/FrameContext.msg"
   DEPENDENCIES std_msgs
 )

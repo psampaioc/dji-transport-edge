@@ -1,0 +1,24 @@
+services:
+  dji_edge_humble:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USERNAME: ${DJI_EDGE_USER:-edge}
+        USER_UID: ${DJI_EDGE_UID:-1000}
+        USER_GID: ${DJI_EDGE_GID:-1000}
+    image: dji-edge-ros:humble
+    network_mode: host
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    volumes:
+      - ..:/workspace:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    environment:
+      DISPLAY: ${DISPLAY}
+      QT_X11_NO_MITSHM: "1"
+      RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-7}
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics,display
+    gpus: all

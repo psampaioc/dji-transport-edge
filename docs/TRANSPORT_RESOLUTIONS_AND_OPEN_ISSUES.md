@@ -1,6 +1,6 @@
 # Resoluções e questões abertas — transporte Android → Edge
 
-Atualizado em 2026-09-18. Este documento é a fonte de acompanhamento para as
+Atualizado em 2026-09-21. Este documento é a fonte de acompanhamento para as
 hipóteses de estabilidade/latência do Primary. Ele separa fatos observados de
 decisões e de verificações ainda pendentes. O repositório Edge não muda o
 contrato Android sem validação conjunta com o SDK.
@@ -44,6 +44,101 @@ evidência localiza a primeira fronteira conhecida que deixou de progredir:
 `rtp_sequence_gaps` é cumulativo. Ele é evidência de descontinuidade de
 sequência, **não** uma percentagem de perda Wi-Fi sem janelas de tempo e início
 de contadores alinhados.
+
+## Sessão analisada mais recentemente (2026-09-21)
+
+Esta é a sessão usada para investigar especificamente as travadas recorrentes
+do Primary. A interrupção permanente ao fim foi provocada pelo operador ao
+desligar/desconectar o drone; ela é preservada como contexto, mas foi removida
+da análise causal das travadas intermediárias.
+
+### Artefatos preservados
+
+| Artefato | Papel | Limite importante |
+|---|---|---|
+| Diagnóstico Android — `transport-a260fe2a.ndjson` (artefato local, não incluído no repositório) | fonte para callbacks DJI, AUs, RTP aceito no socket Android, telemetria e serviço | uma amostra compacta de `health` por aproximadamente 1 s; não substitui uma captura por pacote RTP |
+| Evidência Edge — `edge-0.ndjson` (artefato local, não incluído no repositório) | transições de saúde Primary, contadores RTP recebidos e drops do jitter buffer | registra transições, não cada datagrama; esta versão ainda não grava timestamp Edge em cada transição |
+| Diagnóstico original Android no tablet | origem imutável copiada por ADB/USB | `/sdcard/Android/data/com.dji.sdk.sample/files/transport/<session-id>/transport.ndjson` |
+
+Os dois primeiros artefatos ficam em `.runtime/`, fora do Git por serem
+evidência de uma sessão concreta. O identificador local da sessão foi omitido
+deste documento versionado.
+
+### Fatos observados durante a parte ativa
+
+| Medida | Evidência | Conclusão que podemos tirar |
+|---|---|---|
+| Android produziu Primary | 695 registros `health`; antes da parada final, normalmente 29–31 AUs/s e aproximadamente 500–730 pacotes RTP/s | na granularidade de 1 s, o sender Android continuou a produzir e aceitar RTP durante a janela analisada |
+| Android não reportou falha local | `primary_video_callback_drops=0`, `video_socket_errors=0`, `rtp_errors=0`, fila de vídeo sem chunks descartados | não há prova de congestionamento ou erro no sender Android; isto não prova entrega na rede após `DatagramSocket.send()` |
+| Edge entrou repetidamente em ausência de RTP | 16 transições intermediárias para `waiting_for_udp`; em cada uma `ingress_packet_window=0` | por mais de um segundo de cada vez, nenhum RTP Primary chegou ao `udpsrc` do Edge |
+| Sequência RTP perdeu continuidade no Edge | `rtp_sequence_gap_count` cresceu de 0 para 64.226 em ciclos de recuperação, tipicamente saltos de 3.356–4.478 sequências | a trava visual coincide com descontinuidade RTP observada **antes** do jitter buffer e do decoder |
+| Jitter buffer também descartou atraso | `jitterbuffer_drop_on_latency_count=1.895`, `too_late_count=0` | chegadas irregulares/bursts excederam o limite de 20 ms; esses descartes preservam baixa latência, mas não explicam sozinhos 64.226 sequências ausentes |
+| Decoder recuperou sem erro fatal | após os ciclos, houve `primary_recovery`/`publishing`; não há `pipeline_error` | GStreamer/NVIDIA/ROS são afetados pelo fluxo incompleto, não são a primeira prova de perda |
+
+#### Linha de evidência do Edge
+
+Os seguintes saltos são os contadores cumulativos nas recuperações sucessivas
+do Edge, excluindo a última interrupção permanente: `10 → 3.698 → 7.710 →
+11.929 → 15.407 → 19.622 → 24.100 → 28.422 → 32.738 → 36.874 → 40.913 →
+45.129 → 49.283 → 53.015 → 56.878 → 60.711 → 64.067 → 64.226`.
+
+Cada ciclo teve a mesma forma operacional:
+
+```text
+RTP chega e o Primary publica
+  → Edge fica mais de 1 s sem datagrama RTP (`waiting_for_udp`)
+  → RTP retorna com salto de sequência de milhares de pacotes
+  → decoder aguarda um IDR quando necessário
+  → Primary volta a publicar o frame recente
+```
+
+Isto explica exatamente o comportamento relatado: imagem boa por alguns
+segundos, congelamento/sumiço, e retorno direto ao frame atual em vez de
+acumular vídeo antigo.
+
+### O que a sessão exclui e o que ainda não separa
+
+| Hipótese | Estado | Por quê |
+|---|---|---|
+| Backlog de ROS ou RViz como origem dos gaps | **Excluída como primeira causa** | a continuidade RTP é medida no pad de entrada `udpsrc`, antes de decode, `appsink`, ROS e RViz |
+| Jitter buffer criar os gaps RTP | **Excluída** | o rastreador observa o cabeçalho RTP antes do `rtpjitterbuffer`; o jitter buffer apenas descarta datagramas atrasados depois de recebidos |
+| Falha final do vídeo causada pelo Edge | **Excluída para esta sessão** | a parada final segue o desligamento/desconexão deliberado do drone; depois dela telemetria/health continuaram, mas callbacks/AUs/RTP Android ficaram estáveis |
+| Hub DJI parar repetidamente durante os freezes | **Não demonstrada nesta resolução temporal** | não há intervalo ≥2 s sem progresso RTP Android antes da parada final nos pulsos de 1 Hz; pausas menores que 1 s e bursts internos continuam possíveis |
+| Android aceitar RTP mas a rede não entregar | **Compatível e provável, mas não provada isoladamente** | Android conta `send()` aceito; Edge vê lacunas reais. Falta comparar a sequência RTP atribuída no Android com a mesma sequência capturada no Ubuntu |
+| Packetizer Android pular sequência antes do envio | **Ainda possível** | o log Android atual não registra a continuidade da sequência RTP de saída por janela; o contador de pacotes aceitos não equivale a continuidade de números de sequência |
+
+### Conclusão operacional atual
+
+O `rtp_sequence_gap_count` **não causa** a trava: ele é o instrumento que
+prova que os datagramas RTP não chegaram continuamente ao Edge. A causa física
+permanece numa de duas fronteiras que a instrumentação atual ainda não separa:
+
+1. o packetizer/sender Android salta sequências ou deixa de emitir datagramas;
+2. os datagramas saem do Android, mas são perdidos/retidos entre tablet e
+   `udpsrc` do Ubuntu (Wi-Fi, hotspot/roteamento, interface ou buffers UDP).
+
+Não trocar RTP/UDP por TCP resolve esta evidência: TCP esconderia lacunas por
+retransmissão e introduziria *head-of-line blocking*, portanto entregaria vídeo
+antigo justamente quando o requisito é o frame mais recente.
+
+### Próximo experimento que decide a fronteira
+
+Durante uma trava real, registrar simultaneamente, sem alterar o contrato:
+
+1. **Android/SDK:** sequência RTP atribuída pelo packetizer imediatamente antes
+   de `send()`, incluindo delta, máximo de datagrama e duração de `send()`;
+2. **Ubuntu/Edge:** sequência RTP observada na entrada UDP, preferencialmente
+   com PCAP iniciado explicitamente pelo operador ou um contador temporário por
+   janela;
+3. marcar início/fim visual da trava com wall-clock para alinhar os dois logs.
+
+Interpretação:
+
+- sequência já salta no Android: investigar packetizer/encaminhamento Android;
+- sequência contínua no Android, mas salta no Ubuntu: investigar Wi-Fi,
+  hotspot/roteamento e buffers de recepção;
+- sequência contínua nos dois, mas o decoder espera IDR: investigar a
+  associação de Access Units/H.264 e a cadência dos IDRs.
 
 ## Sessão de referência mais recente — `076257a5-…`
 
@@ -203,8 +298,8 @@ de pixels CPU; essa é a cópia final inevitável no contrato ROS atual.
 
 | Ponto | Estado e evidência | Decisão | Próxima verificação / dono |
 |---|---|---|---|
-| Jitter buffer | **Confirmado.** `rtpjitterbuffer latency=20 drop-on-latency=true do-lost=true`. | Manter 20 ms enquanto o requisito for menor latência. Não aumentar para mascarar pausas da origem/rede. | Só testar 50 ms como experimento controlado se houver reordenação comprovada e o custo de latência for aceitável. |
-| Filas de vídeo | **Confirmado.** `appsink max-buffers=1 drop=true sync=false`, seguido de handoff ROS do frame mais recente. | Manter. Não existe backlog de frames velhos no Edge. | Monitorar `dropped_old_frames` e `superseded_frame_rate`; na sessão observada estavam em zero durante estado estável. |
+| Jitter buffer | **Confirmado.** `udpsrc buffer-size=2097152` absorve bursts curtos no socket UDP antes do jitterbuffer; `rtpjitterbuffer latency=20 drop-on-latency=true do-lost=true` continua sendo o limite de latência. | Manter 20 ms enquanto o requisito for menor latência. O buffer do socket não retém frames nem aumenta a política do jitterbuffer; não aumentar a latência para mascarar pausas da origem/rede. | Só testar 50 ms como experimento controlado se houver reordenação comprovada e o custo de latência for aceitável. |
+| Filas de vídeo | **Confirmado.** `appsink max-buffers=1 drop=true sync=false enable-last-sample=false`, seguido de handoff ROS do frame mais recente. | Manter. Não existe backlog de frames velhos nem retenção de uma amostra extra no Edge. | Monitorar `dropped_old_frames` e `superseded_frame_rate`; na sessão observada estavam em zero durante estado estável. |
 | FFmpeg / OpenCV | **Não usados.** | Não adicionar. Seriam outro pipeline/fila sem benefício para o caminho ROS atual. | Nenhuma ação. |
 | Decoder NVIDIA | **Confirmado em execução.** O dashboard mostra `nvidia` e a pipeline seleciona `nvh264dec`, com `avdec_h264` somente como fallback. | Manter detecção automática e fallback. | Continuar registrar backend e erro de pipeline no dashboard/evidência. |
 | Logs de decoder | Não houve crash/erro GStreamer durante a observação. Há 50 incidentes “awaiting recoverable H.264/IDR”; isto é diagnóstico de stream incompleto, não crash. | Não usar watchdog de reinício por perda de frame. | PCAP + diagnóstico Android devem procurar a causa anterior ao IDR ausente: falta de datagramas, seq RTP e cadência de keyframe. |

@@ -11,6 +11,9 @@
 namespace dji_edge_transport {
 namespace {
 constexpr std::size_t kMaximumGstreamerDebugBytes = 1024;
+// Socket-side burst absorption only. This is upstream of rtpjitterbuffer and
+// does not alter the 20 ms latency/drop policy used by the live pipeline.
+constexpr std::size_t kPrimaryUdpReceiveBufferBytes = 2 * 1024 * 1024;
 
 bool unsigned_structure_field(const GstStructure * structure, const char * name, std::uint64_t & result)
 {
@@ -130,12 +133,13 @@ std::string PrimaryVideoPipeline::description(const std::string & decoder) const
 {
   std::ostringstream graph;
   graph << "udpsrc name=primary_source address=" << bind_host_ << " port=" << port_
+        << " buffer-size=" << kPrimaryUdpReceiveBufferBytes
         << " caps=application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=" << payload_type_
         << " ! rtpjitterbuffer name=primary_jitterbuffer latency=" << latency_ms_
         << " drop-on-latency=true do-lost=true post-drop-messages=true drop-messages-interval=1000"
         << " ! rtph264depay wait-for-keyframe=true request-keyframe=true ! h264parse ! " << decoder
         << " ! videoconvert ! video/x-raw,format=BGR ! appsink name=primary_sink emit-signals=false"
-        << " max-buffers=1 drop=true sync=false";
+        << " max-buffers=1 drop=true sync=false enable-last-sample=false";
   return graph.str();
 }
 
@@ -203,12 +207,17 @@ void PrimaryVideoPipeline::observe_rtp(const std::uint8_t * packet, std::size_t 
 bool PrimaryVideoPipeline::start()
 {
   if (closed_.load()) return false;
+  bool nvidia_start_failed = false;
   auto * factory = gst_element_factory_find("nvh264dec");
   if (factory) {
     gst_object_unref(factory);
     if (start_with_decoder("nvh264dec", "nvidia", "NVIDIA decoder pipeline started")) return true;
+    nvidia_start_failed = true;
   }
-  return start_with_decoder("avdec_h264", "cpu", "NVIDIA decoder unavailable; CPU fallback active");
+  return start_with_decoder(
+    "avdec_h264", "cpu",
+    nvidia_start_failed ? "NVIDIA decoder failed to start; CPU fallback active" :
+    "NVIDIA decoder unavailable; CPU fallback active");
 }
 
 void PrimaryVideoPipeline::set_error(const std::string & error)

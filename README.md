@@ -13,7 +13,7 @@ dji_edge_transport: one C++ ROS node
   ├─ one headless GStreamer pipeline
   ├─ NVIDIA decode when the running container proves it is available
   ├─ one newest-frame handoff and one ROS delivery worker
-  ├─ /dji/primary/image_raw, navigation, frame context, status and diagnostics
+  ├─ /dji/primary/image_raw, raw flight/RTK/gimbal, navigation, frame context, status and diagnostics
   └─ optional loopback dashboard at http://127.0.0.1:8090
              ↓
 dji_edge_mapper: static PCD map, pose, path and RViz
@@ -21,9 +21,22 @@ dji_edge_mapper: static PCD map, pose, path and RViz
 
 The workspace contains `dji_edge_transport` and `dji_edge_mapper`. [docs/PROTOCOL_V1.md](docs/PROTOCOL_V1.md) owns Android ports, compact JSON, RTP/H.264 and original Android/DJI timestamps. Primary only is supported; no Edge FPV listener exists.
 
+## Telemetry topics
+
+- `/dji/telemetry/flight`, `/dji/telemetry/rtk`, and `/dji/telemetry/gimbal` publish each accepted Android producer independently as `dji_edge_transport/msg/TelemetrySourceState`.
+- `/dji/navigation/state` remains the composed map/path input. It is intentionally absent until flight position is valid; this does not suppress the three independent source topics.
+
 ## Start
 
-Inside the project Humble container:
+The project-scoped container is defined in `docker/compose.yaml` and built from
+`docker/Dockerfile`. Open an interactive container with the `djiedge` alias, or
+run the equivalent command from the project root:
+
+```bash
+docker compose -f docker/compose.yaml run --rm --name dji_edge_humble_dev dji_edge_humble bash
+```
+
+Inside the container:
 
 ```bash
 source /opt/ros/humble/setup.bash

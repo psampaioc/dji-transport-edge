@@ -47,13 +47,18 @@ void RtpIngressTracker::observe(const std::uint8_t * bytes, std::size_t size)
   if (has_sequence_) {
     const auto delta = static_cast<std::uint16_t>(sequence - last_sequence_);
     if (delta == 0) ++snapshot_.duplicate_count;
-    else if (delta < 0x8000) snapshot_.sequence_gap_count += delta - 1;
-    else ++snapshot_.reordered_count;
+    else if (delta < 0x8000) {
+      snapshot_.sequence_gap_count += delta - 1;
+      last_sequence_ = sequence;
+    } else {
+      ++snapshot_.reordered_count;
+    }
+  } else {
+    last_sequence_ = sequence;
   }
   snapshot_.header_continuity_available = true;
   snapshot_.ssrc = ssrc;
   snapshot_.timestamp = read_u32(bytes + 4);
-  last_sequence_ = sequence;
   has_sequence_ = true;
 }
 

@@ -15,6 +15,7 @@
 #include <builtin_interfaces/msg/time.hpp>
 #include <dji_edge_transport/msg/frame_context.hpp>
 #include <dji_edge_transport/msg/navigation_state.hpp>
+#include <dji_edge_transport/msg/telemetry_source_state.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
@@ -50,6 +51,7 @@ private:
   void delivery_loop();
   void publish_status();
   void publish_navigation(const TelemetryPacket & packet);
+  void publish_telemetry_source(const TelemetryPacket & packet, std::uint64_t receive_ns);
   void log_protocol_error(const std::string & category, const std::string & error);
   bool accept_session_locked(const std::string & session, const std::string & logical_stream,
     std::uint64_t sequence, const char * category);
@@ -64,6 +66,9 @@ private:
   std::string primary_topic_;
   std::string context_topic_;
   std::string navigation_topic_;
+  std::string flight_topic_;
+  std::string rtk_topic_;
+  std::string gimbal_topic_;
   std::string status_topic_;
   std::string diagnostics_topic_;
   std::unique_ptr<UdpReceiver> telemetry_receiver_;
@@ -77,6 +82,9 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_publisher_;
   rclcpp::Publisher<dji_edge_transport::msg::FrameContext>::SharedPtr context_publisher_;
   rclcpp::Publisher<dji_edge_transport::msg::NavigationState>::SharedPtr navigation_publisher_;
+  rclcpp::Publisher<dji_edge_transport::msg::TelemetrySourceState>::SharedPtr flight_publisher_;
+  rclcpp::Publisher<dji_edge_transport::msg::TelemetrySourceState>::SharedPtr rtk_publisher_;
+  rclcpp::Publisher<dji_edge_transport::msg::TelemetrySourceState>::SharedPtr gimbal_publisher_;
   rclcpp::Publisher<msg::TransportStatus>::SharedPtr status_publisher_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_publisher_;
   rclcpp::TimerBase::SharedPtr status_timer_;
@@ -88,6 +96,13 @@ private:
   mutable std::mutex state_mutex_;
   std::mutex evidence_state_mutex_;
   std::optional<TelemetryPacket> latest_telemetry_;
+  struct TelemetryObservation {
+    TelemetryPacket packet;
+    std::uint64_t edge_receive_mono_ns{0};
+  };
+  std::optional<TelemetryObservation> latest_flight_;
+  std::optional<TelemetryObservation> latest_rtk_;
+  std::optional<TelemetryObservation> latest_gimbal_;
   std::optional<FrameMetadata> latest_metadata_;
   std::optional<HealthPacket> latest_health_;
   SessionTracker sessions_;

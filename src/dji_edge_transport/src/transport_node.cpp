@@ -76,6 +76,9 @@ TransportNode::TransportNode()
   primary_topic_ = declare_parameter<std::string>("primary_topic", "/dji/primary/image_raw");
   context_topic_ = declare_parameter<std::string>("primary_context_topic", "/dji/primary/frame_context");
   navigation_topic_ = declare_parameter<std::string>("navigation_topic", "/dji/navigation/state");
+  flight_topic_ = declare_parameter<std::string>("flight_topic", "/dji/telemetry/flight");
+  rtk_topic_ = declare_parameter<std::string>("rtk_topic", "/dji/telemetry/rtk");
+  gimbal_topic_ = declare_parameter<std::string>("gimbal_topic", "/dji/telemetry/gimbal");
   status_topic_ = declare_parameter<std::string>("status_topic", "/dji/edge/transport_status");
   diagnostics_topic_ = declare_parameter<std::string>("diagnostics_topic", "/dji/diagnostics");
   const auto diagnostics_period = declare_parameter<double>("diagnostics_period_s", 1.0);
@@ -90,6 +93,9 @@ TransportNode::TransportNode()
   image_publisher_ = create_publisher<sensor_msgs::msg::Image>(primary_topic_, rclcpp::SensorDataQoS());
   context_publisher_ = create_publisher<dji_edge_transport::msg::FrameContext>(context_topic_, rclcpp::SensorDataQoS());
   navigation_publisher_ = create_publisher<dji_edge_transport::msg::NavigationState>(navigation_topic_, 10);
+  flight_publisher_ = create_publisher<dji_edge_transport::msg::TelemetrySourceState>(flight_topic_, 10);
+  rtk_publisher_ = create_publisher<dji_edge_transport::msg::TelemetrySourceState>(rtk_topic_, 10);
+  gimbal_publisher_ = create_publisher<dji_edge_transport::msg::TelemetrySourceState>(gimbal_topic_, 10);
   status_publisher_ = create_publisher<msg::TransportStatus>(status_topic_, 10);
   diagnostics_publisher_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(diagnostics_topic_, 10);
 
@@ -201,6 +207,9 @@ bool TransportNode::accept_session_locked(const std::string & session, const std
   if (decision == SessionObservation::transitioned) {
     source_time_state_.reset(session);
     latest_telemetry_.reset();
+    latest_flight_.reset();
+    latest_rtk_.reset();
+    latest_gimbal_.reset();
     latest_metadata_.reset();
     latest_health_.reset();
     last_metadata_receive_mono_ns_ = 0;
@@ -241,12 +250,17 @@ void TransportNode::on_telemetry(const std::vector<std::uint8_t> & bytes, std::u
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (!accept_session_locked(packet->session, packet->type + ":0", packet->sequence, "telemetry")) return;
     latest_telemetry_ = *packet;
+    const TelemetryObservation observation{*packet, receive_ns};
+    if (packet->type == "flight") latest_flight_ = observation;
+    if (packet->type == "rtk") latest_rtk_ = observation;
+    if (packet->type == "gimbal") latest_gimbal_ = observation;
     source_time_state_.add(*packet);
     navigation = source_time_state_.latest();
     last_telemetry_receive_mono_ns_ = receive_ns;
     ++telemetry_packet_count_;
     latest_telemetry_peer_ = peer;
   }
+  publish_telemetry_source(*packet, receive_ns);
   if (navigation) publish_navigation(*navigation);
 }
 
@@ -295,6 +309,28 @@ void TransportNode::publish_navigation(const TelemetryPacket & packet)
   message.gimbal_pitch_deg = packet.gimbal_pitch_deg;
   message.gimbal_android_mono_ns = packet.gimbal_android_mono_ns;
   navigation_publisher_->publish(message);
+}
+
+void TransportNode::publish_telemetry_source(const TelemetryPacket & packet, std::uint64_t receive_ns)
+{
+  dji_edge_transport::msg::TelemetrySourceState message;
+  message.header.stamp = ros_stamp();
+  message.source = packet.type;
+  message.session = packet.session;
+  message.android_mono_ns = packet.android_mono_ns;
+  message.edge_receive_mono_ns = receive_ns;
+  message.position_valid = packet.position_valid;
+  message.rtk_valid = packet.rtk_valid;
+  message.latitude_deg = packet.latitude_deg;
+  message.longitude_deg = packet.longitude_deg;
+  message.altitude_m = packet.altitude_m;
+  message.heading_deg = packet.heading_deg;
+  message.gimbal_pitch_valid = packet.gimbal_pitch_valid;
+  message.gimbal_pitch_deg = packet.gimbal_pitch_deg;
+
+  if (packet.type == "flight") flight_publisher_->publish(message);
+  if (packet.type == "rtk") rtk_publisher_->publish(message);
+  if (packet.type == "gimbal") gimbal_publisher_->publish(message);
 }
 
 void TransportNode::publish_frame()
@@ -477,7 +513,9 @@ void TransportNode::publish_status()
   diagnostic.name = "dji_edge_transport/primary";
   diagnostic.hardware_id = "android-primary-rtp";
   diagnostic.level = status.state == msg::TransportStatus::PIPELINE_ERROR ?
-    diagnostic_msgs::msg::DiagnosticStatus::ERROR : diagnostic_msgs::msg::DiagnosticStatus::OK;
+    diagnostic_msgs::msg::DiagnosticStatus::ERROR :
+    status.state == msg::TransportStatus::PUBLISHING ?
+    diagnostic_msgs::msg::DiagnosticStatus::OK : diagnostic_msgs::msg::DiagnosticStatus::WARN;
   diagnostic.message = status.state_reason;
   diagnostics.status.push_back(diagnostic);
   diagnostics_publisher_->publish(diagnostics);
@@ -532,6 +570,17 @@ std::string TransportNode::dashboard_state() const
   nlohmann::json sender;
   nlohmann::json primary;
   nlohmann::json telemetry;
+  const auto source_state = [current](const std::optional<TelemetryObservation> & observation) {
+      if (!observation) return nlohmann::json{{"received", false}, {"age_s", -1.0}};
+      const auto & packet = observation->packet;
+      return nlohmann::json{{"received", true},
+        {"age_s", age_seconds(current, observation->edge_receive_mono_ns)},
+        {"session", packet.session}, {"android_mono_ns", packet.android_mono_ns},
+        {"position_valid", packet.position_valid}, {"rtk_valid", packet.rtk_valid},
+        {"latitude_deg", packet.latitude_deg}, {"longitude_deg", packet.longitude_deg},
+        {"altitude_m", packet.altitude_m}, {"heading_deg", packet.heading_deg},
+        {"gimbal_pitch_valid", packet.gimbal_pitch_valid}, {"gimbal_pitch_deg", packet.gimbal_pitch_deg}};
+    };
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     connection = {{"session", sessions_.active_session()},
@@ -571,7 +620,9 @@ std::string TransportNode::dashboard_state() const
       {"clock_received", clock_receiver_ ? clock_receiver_->received() : 0},
       {"clock_rejected", clock_receiver_ ? clock_receiver_->rejected() : 0},
       {"clock_age_s", age_seconds(current, clock_receiver_ ? clock_receiver_->last_receive_mono_ns() : 0)},
-      {"navigation_available", navigation.has_value()}};
+      {"navigation_available", navigation.has_value()},
+      {"sources", {{"flight", source_state(latest_flight_)}, {"rtk", source_state(latest_rtk_)},
+          {"gimbal", source_state(latest_gimbal_)}}}};
     if (navigation) telemetry.update({{"position_valid", navigation->position_valid},
       {"rtk_valid", navigation->rtk_valid}, {"latitude_deg", navigation->latitude_deg},
       {"longitude_deg", navigation->longitude_deg}, {"altitude_m", navigation->altitude_m},

@@ -45,6 +45,16 @@ Only these telemetry fields belong in the transport contract:
 
 Health proves Android-local progress only. It cannot update navigation, gimbal state, frame context, or prove that a specific Android send reached Ubuntu.
 
+## Edge ROS telemetry topics
+
+The Edge publishes each accepted producer independently, without changing the Android datagram contract:
+
+- `/dji/telemetry/flight`
+- `/dji/telemetry/rtk`
+- `/dji/telemetry/gimbal`
+
+All three use `dji_edge_transport/msg/TelemetrySourceState`, retain the original `android_mono_ns`, and include the Edge receive observation separately. `/dji/navigation/state` remains a composed map/path topic: it intentionally requires a valid flight position and may therefore be unavailable while the independent gimbal topic remains valid.
+
 ## Canonical video feed
 
 Only `primary` is accepted by this Edge transport. Physical DJI sources such as `FPV_CAM`, `LEFT_CAM` and `RIGHT_CAM` remain Android-side metadata and must not be confused with the one logical feed.

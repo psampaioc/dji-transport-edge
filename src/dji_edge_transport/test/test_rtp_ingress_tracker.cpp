@@ -35,3 +35,15 @@ TEST(RtpIngressTracker, RejectsMalformedOrWrongPayloadHeaders)
   EXPECT_FALSE(snapshot.header_continuity_available);
   EXPECT_EQ(snapshot.malformed_header_count, 2u);
 }
+
+TEST(RtpIngressTracker, ReorderedPacketsDoNotMoveSequenceHighWatermarkBackwards)
+{
+  dji_edge_transport::RtpIngressTracker tracker(96);
+  for (const auto sequence : std::array<std::uint16_t, 4>{10, 12, 11, 13}) {
+    auto datagram = packet(sequence);
+    tracker.observe(datagram.data(), datagram.size());
+  }
+  const auto snapshot = tracker.snapshot();
+  EXPECT_EQ(snapshot.sequence_gap_count, 1u);
+  EXPECT_EQ(snapshot.reordered_count, 1u);
+}

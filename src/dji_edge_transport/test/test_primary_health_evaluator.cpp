@@ -17,6 +17,8 @@ TEST(PrimaryHealthEvaluator, SeparatesObservablePrimaryBoundaries)
   input.decoded_age_s = 1.1;
   EXPECT_EQ(evaluator.evaluate(input).state, State::decoding);
   input.decoded_age_s = 0.1;
+  input.published_age_s = -1.0;
+  EXPECT_EQ(evaluator.evaluate(input).state, State::delivery_stalled);
   input.published_age_s = 1.1;
   EXPECT_EQ(evaluator.evaluate(input).state, State::delivery_stalled);
   input.published_age_s = 0.1;

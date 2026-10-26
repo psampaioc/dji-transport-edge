@@ -11,7 +11,7 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>diagnostic_msgs</depend>
-  <build_depend>nlohmann-json3-dev</build_depend>
+  <!-- Installed by docker/Dockerfile; this apt package has no rosdep rule. -->
   <exec_depend>rosidl_default_runtime</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
   <member_of_group>rosidl_interface_packages</member_of_group>

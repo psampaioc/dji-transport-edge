@@ -35,7 +35,7 @@ PrimaryHealthAssessment PrimaryHealthEvaluator::evaluate(const PrimaryHealthInpu
     return {PrimaryHealthState::decoding,
       "fresh Primary RTP observed; decoder is awaiting a recoverable H.264/IDR"};
   }
-  if (input.published_age_s > stale_after_s_) {
+  if (input.published_age_s < 0.0 || input.published_age_s > stale_after_s_) {
     return {PrimaryHealthState::delivery_stalled,
       "decoded Primary image is not reaching ROS publication"};
   }
