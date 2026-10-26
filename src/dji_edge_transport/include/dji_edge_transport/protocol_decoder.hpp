@@ -57,6 +57,9 @@ struct HealthPacket {
 };
 
 struct ClockPacket {
+  std::string session;
+  std::string stream;
+  std::uint64_t sequence{0};
   std::uint64_t t0_edge_send_mono_ns{0};
   std::uint64_t t1_android_rx_mono_ns{0};
   std::uint64_t t2_android_tx_mono_ns{0};

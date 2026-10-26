@@ -261,6 +261,9 @@ std::optional<ClockPacket> decode_clock(
     }
     ClockPacket packet;
     packet.is_pong = type == "clock_pong";
+    packet.session = string_value(root, "session");
+    packet.stream = string_value(root, "stream");
+    packet.sequence = uint_value(root, "seq");
     packet.t0_edge_send_mono_ns = uint_value(root, "t0_edge_send_mono_ns");
     packet.t1_android_rx_mono_ns = uint_value(root, "t1_android_rx_mono_ns");
     packet.t2_android_tx_mono_ns = uint_value(root, "t2_android_tx_mono_ns");

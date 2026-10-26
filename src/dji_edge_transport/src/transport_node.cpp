@@ -115,9 +115,15 @@ TransportNode::TransportNode()
   clock_receiver_ = std::make_unique<UdpReceiver>(
     bind_host_, static_cast<std::uint16_t>(clock_port), max_json_bytes_,
     [this](const auto & bytes, auto receive_ns, const auto & peer) { on_clock(bytes, receive_ns, peer); });
-  telemetry_receiver_->start();
-  metadata_receiver_->start();
-  clock_receiver_->start();
+  if (!telemetry_receiver_->start()) {
+    RCLCPP_ERROR(get_logger(), "Telemetry UDP receiver failed: %s", telemetry_receiver_->last_error().c_str());
+  }
+  if (!metadata_receiver_->start()) {
+    RCLCPP_ERROR(get_logger(), "Metadata UDP receiver failed: %s", metadata_receiver_->last_error().c_str());
+  }
+  if (!clock_receiver_->start()) {
+    RCLCPP_ERROR(get_logger(), "Clock UDP receiver failed: %s", clock_receiver_->last_error().c_str());
+  }
   clock_pinger_ = std::make_unique<ClockPinger>(android_clock_host_,
     static_cast<std::uint16_t>(clock_port), "edge-clock", clock_interval_s, clock_timeout_s,
     max_json_bytes_, [this](const ClockPacket & pong, std::uint64_t receive_ns) {
@@ -259,9 +265,9 @@ void TransportNode::on_telemetry(const std::vector<std::uint8_t> & bytes, std::u
     last_telemetry_receive_mono_ns_ = receive_ns;
     ++telemetry_packet_count_;
     latest_telemetry_peer_ = peer;
+    publish_telemetry_source(*packet, receive_ns);
+    if (navigation) publish_navigation(*navigation);
   }
-  publish_telemetry_source(*packet, receive_ns);
-  if (navigation) publish_navigation(*navigation);
 }
 
 void TransportNode::on_frame_metadata(const std::vector<std::uint8_t> & bytes, std::uint64_t receive_ns,
@@ -387,6 +393,10 @@ void TransportNode::publish_status()
   status.rtp_sequence_gap_count = snapshot.rtp.sequence_gap_count;
   status.rtp_duplicate_count = snapshot.rtp.duplicate_count;
   status.rtp_reordered_count = snapshot.rtp.reordered_count;
+  status.rtp_pending_gap_count = snapshot.rtp.pending_gap_count;
+  status.rtp_late_fill_count = snapshot.rtp.late_fill_count;
+  status.rtp_sequence_wrap_count = snapshot.rtp.sequence_wrap_count;
+  status.rtp_ssrc_epoch_count = snapshot.rtp.ssrc_epoch_count;
   status.rtp_malformed_header_count = snapshot.rtp.malformed_header_count;
   status.jitterbuffer_drop_message_count = snapshot.jitterbuffer.message_count;
   status.jitterbuffer_too_late_count = snapshot.jitterbuffer.too_late_count;
@@ -397,6 +407,12 @@ void TransportNode::publish_status()
   status.decoder_backend = snapshot.decoder_backend;
   status.decoder_reason = snapshot.decoder_reason;
   status.pipeline_error = snapshot.pipeline_error;
+  status.telemetry_receiver_ready = telemetry_receiver_ && telemetry_receiver_->ready();
+  status.telemetry_receiver_error = telemetry_receiver_ ? telemetry_receiver_->last_error() : "not configured";
+  status.metadata_receiver_ready = metadata_receiver_ && metadata_receiver_->ready();
+  status.metadata_receiver_error = metadata_receiver_ ? metadata_receiver_->last_error() : "not configured";
+  status.clock_receiver_ready = clock_receiver_ && clock_receiver_->ready();
+  status.clock_receiver_error = clock_receiver_ ? clock_receiver_->last_error() : "not configured";
   const auto clock = clock_mapper_.estimate();
   const auto clock_last_success = clock_pinger_ ? clock_pinger_->last_success_mono_ns() : 0;
   const auto clock_current = clock.ready && clock_last_success > 0 &&
@@ -543,6 +559,10 @@ void TransportNode::record_status_transition(const msg::TransportStatus & status
     {"rtp_duplicate_window", status.rtp_duplicate_window},
     {"rtp_reordered_count", status.rtp_reordered_count},
     {"rtp_reordered_window", status.rtp_reordered_window},
+    {"rtp_pending_gap_count", status.rtp_pending_gap_count},
+    {"rtp_late_fill_count", status.rtp_late_fill_count},
+    {"rtp_sequence_wrap_count", status.rtp_sequence_wrap_count},
+    {"rtp_ssrc_epoch_count", status.rtp_ssrc_epoch_count},
     {"rtp_malformed_header_count", status.rtp_malformed_header_count},
     {"rtp_malformed_header_window", status.rtp_malformed_header_window},
     {"jitterbuffer_drop_message_count", status.jitterbuffer_drop_message_count},
@@ -589,7 +609,13 @@ std::string TransportNode::dashboard_state() const
       {"telemetry_peer_ipv4", latest_telemetry_peer_.ipv4},
       {"telemetry_peer_port", latest_telemetry_peer_.port},
       {"metadata_peer_ipv4", latest_metadata_peer_.ipv4},
-      {"metadata_peer_port", latest_metadata_peer_.port}};
+      {"metadata_peer_port", latest_metadata_peer_.port},
+      {"telemetry_receiver_ready", telemetry_receiver_ && telemetry_receiver_->ready()},
+      {"telemetry_receiver_error", telemetry_receiver_ ? telemetry_receiver_->last_error() : "not configured"},
+      {"metadata_receiver_ready", metadata_receiver_ && metadata_receiver_->ready()},
+      {"metadata_receiver_error", metadata_receiver_ ? metadata_receiver_->last_error() : "not configured"},
+      {"clock_receiver_ready", clock_receiver_ && clock_receiver_->ready()},
+      {"clock_receiver_error", clock_receiver_ ? clock_receiver_->last_error() : "not configured"}};
     sender = {{"health_age_s", age_seconds(current, last_health_receive_mono_ns_)},
       {"health_count", health_count_}};
     if (latest_health_) sender["counters"] = {{"primary_video_callbacks", latest_health_->primary_video_callbacks},
@@ -646,6 +672,8 @@ std::string TransportNode::dashboard_state() const
     {"rtp_header_continuity_available", snapshot.rtp.header_continuity_available},
     {"rtp_sequence_gaps", snapshot.rtp.sequence_gap_count}, {"rtp_duplicates", snapshot.rtp.duplicate_count},
     {"rtp_reordered", snapshot.rtp.reordered_count}, {"rtp_malformed_headers", snapshot.rtp.malformed_header_count},
+    {"rtp_pending_gaps", snapshot.rtp.pending_gap_count}, {"rtp_late_fills", snapshot.rtp.late_fill_count},
+    {"rtp_sequence_wraps", snapshot.rtp.sequence_wrap_count}, {"rtp_ssrc_epochs", snapshot.rtp.ssrc_epoch_count},
     {"ingress_packets_window", ingress_packets_window_.load()},
     {"ingress_bytes_window", ingress_bytes_window_.load()},
     {"rtp_sequence_gaps_window", rtp_sequence_gaps_window_.load()},

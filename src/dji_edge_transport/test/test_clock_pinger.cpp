@@ -4,12 +4,14 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <array>
 #include <chrono>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -142,10 +144,10 @@ TEST(ClockPinger, SeparatesMalformedFromUnmatchedPongs)
   EXPECT_FALSE(pinger.exchange_once());
   responder.join();
   EXPECT_EQ(pinger.successes(), 0u);
-  EXPECT_EQ(pinger.timeouts(), 0u);
+  EXPECT_EQ(pinger.timeouts(), 2u);
   EXPECT_EQ(pinger.decode_failures(), 1u);
   EXPECT_EQ(pinger.unmatched_pongs(), 1u);
-  EXPECT_EQ(pinger.last_error(), "unmatched clock pong");
+  EXPECT_EQ(pinger.last_error(), "clock timeout");
 }
 
 TEST(ClockPinger, BackgroundProbesReuseOneSourcePort)
@@ -198,6 +200,68 @@ TEST(ClockPinger, BackgroundProbesReuseOneSourcePort)
   EXPECT_NE(first_port.load(), 0);
   EXPECT_EQ(second_port.load(), first_port.load());
   EXPECT_GE(pinger.successes(), 2u);
+}
+
+TEST(ClockPinger, IgnoresMalformedAndUnmatchedTrafficUntilMatchingPong)
+{
+  SocketGuard server(socket(AF_INET, SOCK_DGRAM, 0));
+  ASSERT_GE(server.get(), 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(bind(server.get(), reinterpret_cast<const sockaddr *>(&address), sizeof(address)), 0);
+  socklen_t address_size = sizeof(address);
+  ASSERT_EQ(getsockname(server.get(), reinterpret_cast<sockaddr *>(&address), &address_size), 0);
+  SocketGuard wrong_peer(socket(AF_INET, SOCK_DGRAM, 0));
+  ASSERT_GE(wrong_peer.get(), 0);
+  sockaddr_in rogue{};
+  rogue.sin_family = AF_INET;
+  ASSERT_EQ(inet_pton(AF_INET, "127.0.0.2", &rogue.sin_addr), 1);
+  rogue.sin_port = 0;
+  ASSERT_EQ(bind(wrong_peer.get(), reinterpret_cast<const sockaddr *>(&rogue), sizeof(rogue)), 0);
+
+  std::thread responder([&]() {
+    std::array<char, 1200> buffer{};
+    sockaddr_in client{};
+    socklen_t client_size = sizeof(client);
+    const auto received = recvfrom(server.get(), buffer.data(), buffer.size(), 0,
+      reinterpret_cast<sockaddr *>(&client), &client_size);
+    ASSERT_GT(received, 0);
+    const auto ping = nlohmann::json::parse(buffer.data(), buffer.data() + received);
+    const auto make_pong = [&](const std::string & session, const std::string & stream,
+        std::uint64_t sequence, std::uint64_t t0) {
+        return nlohmann::json{{"v", 1}, {"type", "clock_pong"}, {"session", session},
+          {"stream", stream}, {"seq", sequence}, {"t0_edge_send_mono_ns", t0},
+          {"t1_android_rx_mono_ns", 200ULL}, {"t2_android_tx_mono_ns", 210ULL}}.dump();
+      };
+    const auto send_to_client = [&](int fd, const std::string & text) {
+        return sendto(fd, text.data(), text.size(), 0,
+          reinterpret_cast<const sockaddr *>(&client), client_size) == static_cast<ssize_t>(text.size());
+      };
+    EXPECT_TRUE(send_to_client(server.get(), "{}"));
+    EXPECT_TRUE(send_to_client(wrong_peer.get(), make_pong("edge-test", "clock",
+        ping.at("seq"), ping.at("t0_edge_send_mono_ns"))));
+    EXPECT_TRUE(send_to_client(server.get(), make_pong("other-session", "clock",
+        ping.at("seq"), ping.at("t0_edge_send_mono_ns"))));
+    EXPECT_TRUE(send_to_client(server.get(), make_pong("edge-test", "other-stream",
+        ping.at("seq"), ping.at("t0_edge_send_mono_ns"))));
+    EXPECT_TRUE(send_to_client(server.get(), make_pong("edge-test", "clock",
+        ping.at("seq").get<std::uint64_t>() + 1, ping.at("t0_edge_send_mono_ns"))));
+    EXPECT_TRUE(send_to_client(server.get(), make_pong("edge-test", "clock",
+        ping.at("seq"), ping.at("t0_edge_send_mono_ns").get<std::uint64_t>() + 1)));
+    EXPECT_TRUE(send_to_client(server.get(), make_pong("edge-test", "clock",
+        ping.at("seq"), ping.at("t0_edge_send_mono_ns"))));
+  });
+
+  dji_edge_transport::ClockPinger pinger("127.0.0.1", ntohs(address.sin_port), "edge-test",
+    1.0, 0.5, 1200, {});
+  EXPECT_TRUE(pinger.exchange_once());
+  responder.join();
+  EXPECT_EQ(pinger.successes(), 1u);
+  EXPECT_EQ(pinger.timeouts(), 0u);
+  EXPECT_EQ(pinger.decode_failures(), 1u);
+  EXPECT_EQ(pinger.unmatched_pongs(), 5u);
 }
 
 }  // namespace

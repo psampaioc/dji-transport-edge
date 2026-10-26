@@ -1,9 +1,11 @@
 #include "dji_edge_transport/clock_pinger.hpp"
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <nlohmann/json.hpp>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -88,8 +90,9 @@ bool ClockPinger::exchange_on_socket(int socket_fd)
     return false;
   }
   const auto t0 = now_ns();
+  const auto sequence = ++sequence_;
   const auto packet = nlohmann::json{{"v", 1}, {"type", "clock_ping"},
-      {"session", session_}, {"stream", "clock"}, {"seq", ++sequence_},
+      {"session", session_}, {"stream", "clock"}, {"seq", sequence},
       {"t0_edge_send_mono_ns", t0}}.dump();
   if (sendto(socket_fd, packet.data(), packet.size(), 0,
       reinterpret_cast<const sockaddr *>(&target), sizeof(target)) < 0) {
@@ -98,44 +101,80 @@ bool ClockPinger::exchange_on_socket(int socket_fd)
     last_error_ = std::strerror(errno);
     return false;
   }
-  timeval timeout{};
-  timeout.tv_sec = static_cast<time_t>(timeout_s_);
-  timeout.tv_usec = static_cast<suseconds_t>((timeout_s_ - timeout.tv_sec) * 1'000'000.0);
-  setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
   std::vector<std::uint8_t> bytes(max_bytes_ + 1);
-  const auto received = recvfrom(socket_fd, bytes.data(), bytes.size(), 0, nullptr, nullptr);
-  const auto t3 = now_ns();
-  if (received < 0) {
-    if (errno == EAGAIN || errno == EWOULDBLOCK) ++timeouts_;
-    else ++receive_failures_;
-    std::lock_guard<std::mutex> lock(error_mutex_);
-    last_error_ = errno == EAGAIN || errno == EWOULDBLOCK ? "clock timeout" : std::strerror(errno);
-    return false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_s_);
+  while (true) {
+    const auto remaining = deadline - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::steady_clock::duration::zero()) {
+      ++timeouts_;
+      std::lock_guard<std::mutex> lock(error_mutex_);
+      last_error_ = "clock timeout";
+      return false;
+    }
+    const auto timeout_ms = static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(remaining).count());
+    pollfd descriptor{socket_fd, POLLIN, 0};
+    const auto polled = poll(&descriptor, 1, std::max(timeout_ms, 1));
+    if (polled == 0) continue;
+    if (polled < 0) {
+      if (errno == EINTR) continue;
+      ++receive_failures_;
+      std::lock_guard<std::mutex> lock(error_mutex_);
+      last_error_ = std::string("poll: ") + std::strerror(errno);
+      return false;
+    }
+    if ((descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
+      ++receive_failures_;
+      std::lock_guard<std::mutex> lock(error_mutex_);
+      last_error_ = "clock socket poll error";
+      return false;
+    }
+    sockaddr_in peer{};
+    socklen_t peer_size = sizeof(peer);
+    const auto received = recvfrom(socket_fd, bytes.data(), bytes.size(), 0,
+      reinterpret_cast<sockaddr *>(&peer), &peer_size);
+    if (received < 0) {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+      ++receive_failures_;
+      std::lock_guard<std::mutex> lock(error_mutex_);
+      last_error_ = std::string("recvfrom: ") + std::strerror(errno);
+      return false;
+    }
+    if (static_cast<std::size_t>(received) > max_bytes_) {
+      ++decode_failures_;
+      std::lock_guard<std::mutex> lock(error_mutex_);
+      last_error_ = "clock packet exceeds size limit";
+      continue;
+    }
+    std::string error;
+    bytes.resize(static_cast<std::size_t>(received));
+    const auto pong = decode_clock(bytes, max_bytes_, error);
+    bytes.resize(max_bytes_ + 1);
+    if (!pong) {
+      ++decode_failures_;
+      std::lock_guard<std::mutex> lock(error_mutex_);
+      last_error_ = error;
+      continue;
+    }
+    if (peer.sin_addr.s_addr != target.sin_addr.s_addr || !pong->is_pong ||
+      pong->session != session_ || pong->stream != "clock" || pong->sequence != sequence ||
+      pong->t0_edge_send_mono_ns != t0)
+    {
+      ++unmatched_pongs_;
+      std::lock_guard<std::mutex> lock(error_mutex_);
+      last_error_ = "unmatched clock pong";
+      continue;
+    }
+    const auto t3 = now_ns();
+    ++successes_;
+    last_success_mono_ns_.store(t3);
+    last_rtt_ns_.store(t3 - t0);
+    {
+      std::lock_guard<std::mutex> lock(error_mutex_);
+      last_error_.clear();
+    }
+    if (callback_) callback_(*pong, t3);
+    return true;
   }
-  std::string error;
-  bytes.resize(static_cast<std::size_t>(received));
-  const auto pong = decode_clock(bytes, max_bytes_, error);
-  if (!pong) {
-    ++decode_failures_;
-    std::lock_guard<std::mutex> lock(error_mutex_);
-    last_error_ = error;
-    return false;
-  }
-  if (!pong->is_pong || pong->t0_edge_send_mono_ns != t0) {
-    ++unmatched_pongs_;
-    std::lock_guard<std::mutex> lock(error_mutex_);
-    last_error_ = "unmatched clock pong";
-    return false;
-  }
-  ++successes_;
-  last_success_mono_ns_.store(t3);
-  last_rtt_ns_.store(t3 - t0);
-  {
-    std::lock_guard<std::mutex> lock(error_mutex_);
-    last_error_.clear();
-  }
-  if (callback_) callback_(*pong, t3);
-  return true;
 }
 
 }  // namespace dji_edge_transport

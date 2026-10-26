@@ -66,6 +66,7 @@ public:
   FrameHandoff & handoff() { return handoff_; }
 
 private:
+  friend class PrimaryVideoPipelineTestAccess;
   std::string description(const std::string & decoder) const;
   bool start_with_decoder(const std::string & decoder, const std::string & backend, const std::string & reason);
   void reset_pipeline();
@@ -77,6 +78,7 @@ private:
   FrameHandoff & handoff_;
   std::function<void()> frame_ready_;
   std::function<void(const std::string &)> logger_;
+  std::mutex pipeline_control_mutex_;
   mutable std::mutex mutex_;
   GstElement * pipeline_{nullptr};
   GstElement * sink_{nullptr};
@@ -94,6 +96,8 @@ private:
   std::string decoder_backend_{"cpu"};
   std::string decoder_reason_;
   std::string pipeline_error_;
+  bool decoder_output_seen_{false};
+  bool cpu_fallback_attempted_{false};
 };
 
 }  // namespace dji_edge_transport

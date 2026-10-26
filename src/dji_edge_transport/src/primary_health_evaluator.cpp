@@ -29,7 +29,7 @@ PrimaryHealthAssessment PrimaryHealthEvaluator::evaluate(const PrimaryHealthInpu
   }
   if (input.decoded_age_s < 0.0) {
     return {PrimaryHealthState::waiting_for_keyframe,
-      "RTP observed; waiting for a decodable keyframe"};
+      "RTP observed; selected decoder has not produced its first frame"};
   }
   if (input.decoded_age_s > stale_after_s_) {
     return {PrimaryHealthState::decoding,

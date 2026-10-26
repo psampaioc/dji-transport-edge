@@ -140,4 +140,10 @@ observes valid complete RTP headers. It does not open a second listener on
 `FrameContext` remains `ASSOCIATION_UNAVAILABLE` until a separate design proves
 AU-to-decoded-image identity.
 
+The tracker keeps a fixed 64-sequence reorder horizon. Recent holes are exposed
+as pending and may be filled by reordered packets; only holes still unresolved
+when they leave the horizon or the SSRC epoch ends become finalized gaps.
+Wraps and SSRC epochs are counted separately. These are Edge-ingress
+observations, not proof of loss location or sender failure.
+
 The decoder backend and its selection reason are also Edge-only diagnostics. `nvidia` is reported only after the active container's GStreamer runtime starts the NVIDIA decoder pipeline; `cpu` means `avdec_h264` is active, with a concrete fallback reason. Neither value changes the Android RTP/H.264 contract or any source timestamp.

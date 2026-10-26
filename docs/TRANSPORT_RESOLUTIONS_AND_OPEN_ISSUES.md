@@ -1,6 +1,6 @@
 # Resoluções e questões abertas — transporte Android → Edge
 
-Atualizado em 2026-09-21. Este documento é a fonte de acompanhamento para as
+Atualizado em 2026-10-26. Este documento é a fonte de acompanhamento para as
 hipóteses de estabilidade/latência do Primary. Ele separa fatos observados de
 decisões e de verificações ainda pendentes. O repositório Edge não muda o
 contrato Android sem validação conjunta com o SDK.
@@ -44,6 +44,14 @@ evidência localiza a primeira fronteira conhecida que deixou de progredir:
 `rtp_sequence_gaps` é cumulativo. Ele é evidência de descontinuidade de
 sequência, **não** uma percentagem de perda Wi-Fi sem janelas de tempo e início
 de contadores alinhados.
+
+O tracker atual mantém uma janela fixa de 64 sequências: gaps recentes ficam
+provisórios e podem ser preenchidos por pacotes reordenados. Só os gaps ainda
+abertos ao sair da janela ou ao terminar uma época SSRC entram no contador
+finalizado. Esses números continuam sendo observações no ingresso do Edge, não
+prova de onde ocorreu uma perda. Os valores históricos desta sessão foram
+capturados pelo algoritmo anterior, que finalizava gaps imediatamente, e não
+são recalculados por esta alteração.
 
 ## Sessão analisada mais recentemente (2026-09-21)
 

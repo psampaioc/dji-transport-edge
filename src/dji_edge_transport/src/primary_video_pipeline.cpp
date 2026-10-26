@@ -171,21 +171,29 @@ bool PrimaryVideoPipeline::start_with_decoder(const std::string & decoder, const
   GstAppSinkCallbacks callbacks{};
   callbacks.new_sample = on_sample;
   gst_app_sink_set_callbacks(GST_APP_SINK(sink_), &callbacks, this, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    decoder_backend_ = backend;
+    decoder_reason_ = reason;
+    pipeline_error_.clear();
+    decoder_output_seen_ = false;
+  }
   const auto result = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
   if (result == GST_STATE_CHANGE_FAILURE) {
     set_error("GStreamer pipeline could not enter PLAYING");
     reset_pipeline();
     return false;
   }
-  decoder_backend_ = backend;
-  decoder_reason_ = reason;
-  pipeline_error_.clear();
   return true;
 }
 
 void PrimaryVideoPipeline::accept_frame(DecodedFrame frame)
 {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!decoder_output_seen_) {
+    decoder_reason_ += "; first decoded frame received";
+    decoder_output_seen_ = true;
+  }
   width_ = frame.width;
   height_ = frame.height;
   last_decoded_mono_ns_ = frame.decoded_mono_ns;
@@ -206,6 +214,7 @@ void PrimaryVideoPipeline::observe_rtp(const std::uint8_t * packet, std::size_t 
 
 bool PrimaryVideoPipeline::start()
 {
+  std::lock_guard<std::mutex> pipeline_lock(pipeline_control_mutex_);
   if (closed_.load()) return false;
   bool nvidia_start_failed = false;
   auto * factory = gst_element_factory_find("nvh264dec");
@@ -214,6 +223,7 @@ bool PrimaryVideoPipeline::start()
     if (start_with_decoder("nvh264dec", "nvidia", "NVIDIA decoder pipeline started")) return true;
     nvidia_start_failed = true;
   }
+  cpu_fallback_attempted_ = nvidia_start_failed;
   return start_with_decoder(
     "avdec_h264", "cpu",
     nvidia_start_failed ? "NVIDIA decoder failed to start; CPU fallback active" :
@@ -229,6 +239,7 @@ void PrimaryVideoPipeline::set_error(const std::string & error)
 
 void PrimaryVideoPipeline::poll_bus()
 {
+  std::lock_guard<std::mutex> pipeline_lock(pipeline_control_mutex_);
   if (!bus_ || closed_.load()) return;
   while (auto * message = gst_bus_pop_filtered(
       bus_, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS | GST_MESSAGE_ELEMENT))) {
@@ -237,11 +248,34 @@ void PrimaryVideoPipeline::poll_bus()
       gchar * debug = nullptr;
       gst_message_parse_error(message, &error, &debug);
       const auto * source = GST_MESSAGE_SRC(message);
-      set_error(format_gstreamer_error(
+      const auto formatted_error = format_gstreamer_error(
         source ? GST_OBJECT_NAME(source) : "", error ? error->message : "GStreamer error",
-        debug ? debug : ""));
+        debug ? debug : "");
       if (error) g_error_free(error);
       if (debug) g_free(debug);
+      bool nvidia_selected = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        nvidia_selected = decoder_backend_ == "nvidia";
+      }
+      if (nvidia_selected && !cpu_fallback_attempted_) {
+        cpu_fallback_attempted_ = true;
+        set_error(formatted_error);
+        gst_message_unref(message);
+        reset_pipeline();
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          last_decoded_mono_ns_ = 0;
+          width_ = 0;
+          height_ = 0;
+        }
+        if (!start_with_decoder("avdec_h264", "cpu", "NVIDIA pipeline failed; CPU fallback active")) {
+          const auto cpu_error = snapshot().pipeline_error;
+          set_error("NVIDIA pipeline failed: " + formatted_error + "; CPU fallback failed: " + cpu_error);
+        }
+        return;
+      }
+      set_error(formatted_error);
     } else if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS) {
       set_error("GStreamer EOS");
     } else {
@@ -259,6 +293,7 @@ void PrimaryVideoPipeline::poll_bus()
 
 void PrimaryVideoPipeline::close()
 {
+  std::lock_guard<std::mutex> pipeline_lock(pipeline_control_mutex_);
   if (closed_.exchange(true)) return;
   reset_pipeline();
 }

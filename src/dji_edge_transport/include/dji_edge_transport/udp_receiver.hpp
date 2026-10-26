@@ -1,8 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -22,8 +24,10 @@ public:
   ~UdpReceiver();
   UdpReceiver(const UdpReceiver &) = delete;
   UdpReceiver & operator=(const UdpReceiver &) = delete;
-  void start();
+  bool start();
   void stop();
+  bool ready() const;
+  std::string last_error() const;
   std::uint64_t received() const { return received_.load(); }
   std::uint64_t rejected() const { return rejected_.load(); }
   std::uint64_t last_receive_mono_ns() const { return last_receive_mono_ns_.load(); }
@@ -38,7 +42,11 @@ private:
   std::atomic<std::uint64_t> received_{0};
   std::atomic<std::uint64_t> rejected_{0};
   std::atomic<std::uint64_t> last_receive_mono_ns_{0};
-  int socket_{-1};
+  mutable std::mutex state_mutex_;
+  std::condition_variable ready_cv_;
+  bool start_complete_{false};
+  bool ready_{false};
+  std::string last_error_;
   std::thread thread_;
 };
 

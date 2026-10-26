@@ -1,6 +1,8 @@
 #include "dji_edge_transport/protocol_decoder.hpp"
 
+#include <algorithm>
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -45,6 +47,30 @@ TEST(ProtocolDecoder, DecodesCommittedAndroidContractFixtures)
   const auto clock = dji_edge_transport::decode_clock(fixture("clock_pong.json"), 1200, error);
   ASSERT_TRUE(clock.has_value()) << error;
   EXPECT_TRUE(clock->is_pong);
+  EXPECT_EQ(clock->session, "edge-clock");
+  EXPECT_EQ(clock->stream, "clock");
+  EXPECT_EQ(clock->sequence, 7u);
+}
+
+TEST(ProtocolDecoder, DecodesHealthEntryFromDeployGoldenPackets)
+{
+  const std::string path = std::string(DJI_EDGE_TRANSPORT_SOURCE_DIR) +
+    "/../../deploy/protocol/v1/golden_packets.json";
+  std::ifstream input(path);
+  ASSERT_TRUE(input.good()) << path;
+  const auto golden = nlohmann::json::parse(input);
+  const auto & packets = golden.at("telemetry_json");
+  const auto health_packet = std::find_if(packets.begin(), packets.end(), [](const auto & packet) {
+      return packet.value("type", "") == "health";
+    });
+  ASSERT_NE(health_packet, packets.end());
+  const auto text = health_packet->dump();
+  const std::vector<std::uint8_t> bytes(text.begin(), text.end());
+  std::string error;
+  const auto health = dji_edge_transport::decode_health(bytes, 1200, error);
+  ASSERT_TRUE(health.has_value()) << error;
+  EXPECT_EQ(health->sequence, 3u);
+  EXPECT_EQ(health->primary_rtp_packets, 20u);
 }
 
 TEST(ProtocolDecoder, AcceptsPrimaryFrameMetadata)

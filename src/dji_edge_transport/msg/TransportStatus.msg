@@ -39,6 +39,10 @@ bool rtp_header_continuity_available
 uint64 rtp_sequence_gap_count
 uint64 rtp_duplicate_count
 uint64 rtp_reordered_count
+uint64 rtp_pending_gap_count
+uint64 rtp_late_fill_count
+uint64 rtp_sequence_wrap_count
+uint64 rtp_ssrc_epoch_count
 uint64 rtp_malformed_header_count
 uint64 ingress_packet_window
 uint64 ingress_byte_window
@@ -70,3 +74,9 @@ uint64 clock_decode_failure_count
 uint64 clock_unmatched_pong_count
 uint64 clock_last_rtt_ns
 string clock_error
+bool telemetry_receiver_ready
+string telemetry_receiver_error
+bool metadata_receiver_ready
+string metadata_receiver_error
+bool clock_receiver_ready
+string clock_receiver_error
